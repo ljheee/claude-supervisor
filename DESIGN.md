@@ -1,0 +1,259 @@
+# claude-supervisor 技术设计原理
+
+本文档记录 claude-supervisor 的设计依据、逆向考古结论、中断模型与各机制的原理。使用方法见 [README.md](README.md)。
+
+## 1. 问题定义
+
+Claude Code 的多个会话之间天然隔离：任务要点、进度、context 各自为政。当用户用多个会话并行推进同一个项目时，缺少三样东西：
+
+1. **全局视角**——谁在干什么、进行到哪；
+2. **督促与审查**——worker 产出后有人把关，而不是干完才发现方向错；
+3. **故障韧性**——worker 因限流/网络/进程问题中断后，项目不会无限期静默死亡。
+
+claude-supervisor 用一个专门的 Supervisor 会话 + 官方跨会话消息机制 + 状态账本解决前两条，用四层防御解决第三条。
+
+## 2. 底层能力考古（逆向 2.1.259 二进制所得）
+
+本节是设计的事实依据，均来自对 `~/.local/share/claude/versions/2.1.259`（191MB Mach-O）的 strings/上下文逆向，**官方无文档，升级版本后需重新验证**。
+
+### 2.1 会话注册表与凭据发布
+
+`~/.claude/sessions/<pid>.json` 是运行中会话的注册表，关键字段：
+
+```json
+{
+  "pid": 80446,
+  "sessionId": "169ac824-...",
+  "cwd": "/path/to/project",
+  "name": "supervisor",           // /rename 固定，或自动派生
+  "messagingSocketPath": "/tmp/cc-socks/80446.sock",  // UDS 消息通道
+  "peerProtocol": 1,
+  "peerFeatures": ["notify_idle", "reply_across_default_dirs", "artifact_yield"],
+  "procStart": "Fri Sep  4 15:18:49 2026"
+}
+```
+
+同目录的 `<pid>.<hash>.key` 是官方"发布"的入站凭据：
+
+```json
+{"peerToken": "12c635aa38def87395898c6aea77c1ba", "procStart": "Fri Sep  4 15:18:49 2026"}
+```
+
+二进制中的证据：`[uds-messaging] Failed to publish the inbox auth key; peers will send unauthenticated (accepted: auth is optional on this platform)`——auth key 会被发布给 peers，且**本平台（macOS）auth 是可选的**（token 校验失败仍接受投递，这降低了本套件对 key 文件可用性的依赖，也意味着 token 匹配是尽力而为而非硬门槛）。
+
+### 2.2 跨会话消息（ListAgents / SendMessage / 帧）
+
+- `ListAgents`（内部名 ListPeers）：列出 subagent / teammates / 本机会话 / 云会话。
+- `SendMessage`：按会话名或 `uds://`/`bridge://` 地址寻址投递。
+- 外部进程注入姿势（二进制中的官方提示原文）：
+
+```bash
+{ echo '{"type":"auth","token":"'"$CLAUDE_CODE_MESSAGING_TOKEN"'"}';
+  echo '{"type":"user","message":{"role":"user","content":"hello"}}'; } \
+| socat - UNIX-CONNECT:$CLAUDE_CODE_MESSAGING_SOCKET
+```
+
+帧协议：顶层 `type` ∈ {auth, user, control}；user 帧的 message 就是标准的 role/content 结构，投递到目标会话后表现为一条用户消息。
+
+### 2.3 hook 事件全集（与本套件相关的部分）
+
+从二进制事件常量表逆向出的完整列表：
+
+```
+PreToolUse, PostToolUse, PostToolUseFailure, PostToolBatch, Notification,
+UserPromptSubmit, UserPromptExpansion, SessionStart, SessionEnd, Stop,
+StopFailure, SubagentStart, SubagentStop, PreCompact, PostCompact,
+PreModelSwitch, PostModelSwitch, PermissionRequest, PermissionDenied,
+Setup, TeammateIdle, TaskCreated, TaskCompleted, Elicitation,
+ElicitationResult, ConfigChange, WorktreeCreate, WorktreeRemove,
+InstructionsLoaded, CwdChanged, FileChanged, DirectoryAdded, MessageDisplay
+```
+
+关键事件：
+
+- **`StopFailure`**（2.1.259 存在）：turn 以失败结束（429 耗尽重试、网络错误、API 错误）时触发。stdin schema：`{hook_event_name, session_id, transcript_path, cwd, prompt_id, error, error_details, last_assistant_message}`。配套执行器 `executeStopFailureHooks`。**这是中断防御第一层的根基。**
+- `PostToolUseFailure`：单个工具调用失败后触发（粒度太细，且 429 发生在模型回合层而非工具层，不适用本场景）。
+- `Stop`：turn 正常结束。不能用于中断检测——它恰恰在失败时不触发。
+- `notify_when_idle`（control 帧 `peer_idle_notice`）：turn 结束的信号性通知。**不能作为中断检测**：错误结束的 turn 是否发 notice 未经验证；即便发，也只表达"停了"不携带原因；进程死亡时主体消失什么都发不出。
+
+### 2.4 明确不用的机制及原因
+
+- **notify_when_idle**：信号太弱、覆盖不全（见 2.3），且 worker 协议已强制每个里程碑主动上报，订阅完成信号属于冗余。
+- **Agent Teams**：官方的 lead/teammate 组织（roster.json、plan 审批、worktree 隔离）。它是"组织内的层级协作"，本套件要的是"平级会话之上的独立监工"——supervisor 不属于团队、不写代码、只审查推进，与 Teams 的 lead（亲自干活的人）角色冲突。用跨会话 messaging + 自定义协议更贴合。
+
+## 3. 架构
+
+```
+用户 ⟷ Supervisor 会话（监工，不写代码）
+              │ ListAgents / SendMessage（官方跨会话消息）
+              │
+     ┌────────┼────────┐
+   Worker A   Worker B  ...（工人会话，各管一段 scope）
+     │
+     │ StopFailure hook（回合失败时自动直投 supervisor UDS）
+     │ WORKER REGISTER / REPORT / STATUS / STALLED / RESUME（协议消息）
+     ▼
+<project>/.supervisor/
+   state.json         ← 全局账本（supervisor 单写，原子写）
+   interrupts.jsonl   ← 中断流水（hook 追加写，append-only，永不回改）
+   acknowledged.jsonl ← 中断确认账本（supervisor 单写，append-only）
+   watchdog_state.json← 告警去重状态（watchdog 单写，原子写）
+```
+
+三要素对应监工模式：
+
+- **被动守卫（Passive Guardrail）**：supervisor 从不主动打断 worker 干活；只在收到上报（或中断通知）后才对已产出的结果做后置审查（Post-audit）。触发器是消息，不是轮询。
+- **OODA 循环**：Observe（读上报 + 亲自读文件/git diff 验证，不只信摘要）→ Orient（对照 goal 与账本）→ Decide（APPROVE / REFINE / ESCALATE）→ Act（SendMessage 下发结构化决策）。随下一次上报再次进入循环。
+- **全局状态存储**：`state.json` 记录 goal、per-worker phase、每次审查结论、事故流水。Loop Guard（同 phase 连续 3 次 REFINE → 升级用户）防"错改-回改"死循环。
+
+### 3.1 身份模型（session_id 主键）
+
+worker 与 supervisor 的身份主键一律是 **session_id**（注册时由 supervisor 通过 ListAgents 从发送方解析获得），name 仅作展示：
+
+- StopFailure hook 的准入判定是"stdin 的 session_id ∈ workers[].session_id"——名字重复、改名、同目录的用户会话、空账本都不会误报（P1-1/P1-3 修复）。
+- hook 寻址 supervisor：先 `supervisor_session_id` 精确匹配；id 失配再退到 `supervisor_name` + 会话 cwd == `project_dir` 双重校验——跨项目的同名 supervisor 会话不会被选中（P1-2 修复）。
+- 升级用户、WATCHDOG ALERT、interrupts 账本都携带 session_id，`claude --resume <session-id>` 的恢复指引可以直接兑现（P1-13 修复）。
+- worker 从子目录启动的场景：hook 从 StopFailure.cwd 向上逐级找 `.supervisor/state.json`，找到后靠 session_id 准入判定排除"路径上误撞的无关项目"（P1-4 修复）。
+
+## 4. 中断模型（本套件的核心设计）
+
+### 4.1 中断三分类
+
+worker 的中断按"谁能感知"分三类，处理主体完全不同：
+
+| 类别 | 例子 | 谁能感知 | 处理层 |
+|---|---|---|---|
+| A. 模型可自见的失败 | 工具连续失败、依赖坏掉 | worker 模型自己（回合还在） | 协议层：WORKER STALLED |
+| B. 回合级传输失败 | 429 耗尽重试、网络错误、API 错误 | 模型**永远**没机会发言；但进程还活着，宿主的 hook 机制仍可执行 | StopFailure hook：WORKER INTERRUPTED |
+| C. 进程级死亡 | 进程被杀、终端关闭、机器休眠 | **没有任何 in-process 机制可用**——执行主体已消失 | 外部检测（watchdog/巡检）+ 人工 resume |
+
+### 4.2 为什么进程死亡"无能为力"是原理性的
+
+B 类与 C 类的本质区别：hook、模型自报、任何消息机制都寄生在 worker 进程里。进程死亡意味着**一切寄生于它的机制同时死亡**——StopFailure hook 没有宿主可执行，WORKER STALLED 没有发送方可发。这不是实现缺陷，是逻辑必然：你不能要求死者报丧。
+
+因此 C 类只能由**进程之外的观察者**处理：
+
+1. watchdog（cron 定时器）发现 worker 超时静默 → 告警 supervisor；
+2. supervisor 巡检（ListAgents 确认可达性）→ 升级用户；
+3. 用户 `claude --resume <session-id>` 恢复会话（会话持久化在 `~/.claude/projects/` 的 jsonl 里，进程死亡不丢 transcript）→ worker 恢复后发 WORKER RESUME。
+
+恢复的锚点是纪律而不是机制：worker 协议强制"每 Phase 立即 commit"，所以任何中断（B/C 类都一样）丢失的最多是当前 Phase 未提交的部分，历史成果在 git 里完好。
+
+### 4.3 四层防御（按响应及时性排序）
+
+```
+B类中断 ──→ ① StopFailure hook（秒级，自动）
+A类中断 ──→ ② 协议层 STALLED/RESUME（worker 自报，秒级）
+静默失联 ──→ ③ supervisor 巡检（被唤醒时顺带，分钟~小时级）
+              ④ 外部 watchdog（cron，分钟级，覆盖 supervisor 自身不在线的盲区）
+```
+
+四层互为冗余而非互斥：hook 投递失败（supervisor 进程也死了）时 `delivered: false` 落盘，③ 的补课逻辑会在 supervisor 下次醒来时追认；③ 依赖 supervisor 被唤醒，④ 用 cron 补上"supervisor 长时间无人唤醒"的盲区。
+
+### 4.4 失联判定的活性语义
+
+**失联时钟只由 worker 主动发出的消息重置**（WORKER REPORT / STATUS / RESUME / REGISTER → `last_response_ts`）。supervisor 自己下发的指令（`last_instruction_ts`）只作展示，绝不参与判定。否则会出现"告警 → 发 STATUS CHECK → 时钟重置 → 再等一个周期"的无限循环，失联的 worker 永远升不了级（P1-10 修复）。
+
+supervisor 无法定时醒来，所以 STATUS CHECK 的"10 分钟无回应重试、再无回应升级"由 `pending_check = {ts, retries}` 状态承载：每次 supervisor 被唤醒时结算（超时则重试或升级），配合 watchdog 的 cron 摧发保证 supervisor 一定会被叫醒（P1-9 修复）。
+
+## 5. StopFailure hook 设计细节
+
+`hooks/worker-stopfailure.py`，注册于 `settings.json` 的 `hooks.StopFailure`。
+
+### 5.1 身份判定
+
+见 3.1。判定链（全通过才投递）：
+
+1. 从 StopFailure.cwd 向上找到 `.supervisor/state.json`（找不到 → 非监工项目，退出）；
+2. `done: true` → 退出；
+3. stdin 的 session_id 必须在 `workers[].session_id` 中（不在 → 退出；空 workers 数组天然全拒）。
+
+### 5.2 supervisor 发现算法
+
+```
+state.supervisor_session_id
+  → 扫 ~/.claude/sessions/*.json，sessionId 精确匹配且 socket 存活 → 用它
+state.supervisor_name + state.project_dir
+  → name 匹配 且 会话 cwd == project_dir 且 socket 存活 → 取 updatedAt 最新
+  → 都不中 → 不投递（interrupts.jsonl 仍落盘，等补课）
+```
+
+auth 在本平台是可选的（见 2.1），key 文件缺失/procStart 不匹配时降级为无 auth 帧投递，不阻断。
+
+### 5.3 落盘与确认语义（delivered / handled / acknowledged）
+
+`delivered` 的语义刻意收窄为"**字节写进了 supervisor 的 UDS**"——sendall 成功不代表 supervisor 处理了（目标进程可能在处理前退出、协议层拒绝或丢弃）。真正的送达确认走三层：
+
+1. hook 每次中断追加一条（append-only，永不回改）到 `interrupts.jsonl`，字段含 `id`、`delivered`、`handled: false`；
+2. supervisor 收到 WORKER INTERRUPTED（或补课时）处理完该中断后，**追加** `{"id": ..., "ts": ..., "action": ...}` 到 `acknowledged.jsonl`（自己的单写账本）；
+3. supervisor 每次被唤醒做差集：`interrupts.jsonl 的 id - acknowledged.jsonl 的 id` = 未处理中断，逐条补处理。
+
+这个设计避免了"原地给 JSONL 行打标"的写-写竞态（supervisor 重写文件会覆盖 hook 并发追加的行），两个账本各自 append-only、单写者明确（P1-5/P1-7 修复）。
+
+### 5.4 安全边界
+
+hook 挂在用户全局 settings.json 上，失败模式必须极度保守：
+
+- 任何异常（含 stdin 畸形、文件不可读、socket 拒连、字段类型异常）→ 静默 `exit 0`；
+- 时间预算有界：UDS connect 1s + send 1s，无等待性 recv（原版 recv(2) 已移除），落盘只 flush 不 fsync（P2-1 修复）；
+- 所有外部输入（error/error_details/sessions 字段）先做类型防御（`as_text` 强转、dict/str 校验）再使用，防异常逃逸（P2-2 修复）；
+- 只读 state.json/sessions，只追加 interrupts.jsonl，**永不碰 state.json**（那是 supervisor 的单写者领地）。
+
+### 5.5 退避与唤醒（supervisor 侧协议）
+
+supervisor 收到 WORKER INTERRUPTED 后：
+
+- kind 为 rate-limit/network：`sleep 300`（5 分钟）后 SendMessage 唤醒。**实现坑**：supervisor 用 Bash 工具执行 sleep 时必须显式传 timeout ≥ 360000ms——Bash 工具默认 2 分钟超时，会在 sleep 结束前先打断它。
+- 多 worker 同时中断：错峰，每个额外 +60s（sleep 360/420/...），避免同时唤醒再次集体撞限流。
+- kind 为 api-error：退避缩至 60s；重试后仍中断直接升级用户（大概率是配置/额度问题，重试无益）。
+- 唤醒后置 `pending_check`，重试/升级由后续唤醒结算（见 4.4）。
+
+## 6. watchdog 设计细节
+
+`watchdog.sh`（安装为 `~/.agent-mail/supervisor-watchdog`），cron 定时调用。
+
+- **失联判定与 4.4 相同**：只认 `last_report_ts` / `last_response_ts` / `registered_at`，忽略 `last_instruction_ts`。
+- **时间解析**：ISO-8601 容错（`fromisoformat` + `Z` 后缀归一 + 两套 fallback 格式），时区偏移会换算到本地再比较；解析失败该 worker 跳过本轮（保守不告警），不做任何输出（P1-11/P2-3 修复）。
+- **告警去重（梯度升级）**：`.supervisor/watchdog_state.json` 记录每 worker 上次告警时的静默分钟数；仅当静默又增长一个完整阈值（T, 2T, 3T...）或条目是新的才再告警。去重状态先原子落盘再发告警——崩溃时最坏丢一条，绝不会有告警风暴（P1-12 修复；空 to_alert 时完全静默）。
+- **macOS 通知**：通知文本经 `osascript` 的 `on run argv` 传参，**永不**拼进 AppleScript 源码——worker 名来自 state.json，是不可信输入（P0-3 修复）。
+- **agent-mail 调用**：参数数组式 subprocess，无 shell 拼接。
+- **永远 exit 0**：shell 层 `trap 'exit 0' EXIT` + python 层 `2>/dev/null || exit 0`，cron 永远收不到错误输出。
+
+## 7. 数据文件与并发纪律
+
+| 文件 | 写者 | 模式 |
+|---|---|---|
+| `state.json` | supervisor 单写 | 读-改-写，**原子写**（tmp + rename），更新前重读最新 |
+| `interrupts.jsonl` | hook 追加写 | append-only，永不回改 |
+| `acknowledged.jsonl` | supervisor 追加写 | append-only（中断确认） |
+| `watchdog_state.json` | watchdog 单写 | 原子写（mkstemp + replace） |
+
+单写者 + append-only + 原子写三原则下，唯一的残余竞态是**读者读到半写文件**：hook/watchdog 读 state.json 遇到解析失败按"未监工/跳过本轮"处理（保守放弃，下一轮 cron 或下一次中断会补上），supervisor 写 state.json 必须走 tmp+rename 原子发布（P1-6 修复，协议层约束——supervisor 是 LLM 不是程序，靠协议明文要求）。`.supervisor/` 整体建议进 .gitignore。
+
+## 8. install.sh 设计细节
+
+- **损坏的 settings.json → 备份后中止安装**，绝不自动重置全局配置（P0-2 修复）；
+- **已有同名文件先备份再覆盖**（时间戳后缀 `.bak-<stamp>`，内容相同时跳过备份）（P0-1 修复）；
+- hook 注册命令用 `shlex.quote()` 构建，路径含单引号也安全（P2-5 修复）；
+- settings.json 更新：flock 排他锁 + mkstemp 唯一临时文件 + fsync + 保留原文件 mode + os.replace 原子发布（P2-4 修复）；
+- hooks 配置结构异常（非对象/非数组）时中止而不是破坏。
+
+## 9. 已知边界（记录在案，非缺陷待修）
+
+1. **进程死亡无自动恢复**（4.2 节，原理性）：watchdog 只能检测+告警，resume 必须人手执行。
+2. **hook 版本依赖**：StopFailure 事件在 2.1.259 二进制中确认存在，官方无文档；Claude Code 升级后该机制可能变化，需要重跑 `test_stopfailure.sh` 回归。
+3. **peerToken 非硬校验**：本平台 auth optional，恶意本地进程本就能读同一 key 文件——本套件不提供跨进程认证，只在单用户信任域内工作。
+4. **错误分类是启发式**：`classify_error` 按错误串关键字归类（429/rate limit/overloaded → rate-limit；timeout/econnreset → network；其余 → api-error），决定退避时长。误分类的后果只是退避时长不优，不影响正确性。
+5. **协议对 LLM 的依赖**：supervisor 是 LLM，state.json 原子写、interrupts 补课、pending_check 结算都写在协议里靠它自觉执行——协议明确性是唯一的保证手段。这是本套件与纯代码方案的本质折衷。
+6. **真实 429 场景未实测**：逆向确认了事件存在和触发条件，但官方无文档；首次实战使用时建议盯第一次触发。
+
+## 10. 测试策略
+
+`test_stopfailure.sh`（22 项断言）与 `test_watchdog.sh`（15 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端/假 agent-mail CLI），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
+
+- hook：正常投递（auth+user 帧、kind 分类、phase、session_id 落账）、陌生人会话/空 workers/done 项目/无 state 目录的零误伤、子目录 cwd 向上寻址、socket 存在但拒连（真 connect 失败分支）、key 缺失的 auth 降级、畸形 stdin、非字符串 error_details、同名 supervisor 诱饵不被选中；
+- watchdog：逾期告警（含 session_id）、同静默级别去重、`last_instruction_ts` 不抑制告警、新鲜 worker/最近响应/done 项目静默、非法阈值/目录/损坏 state/workers 非列表的静默退出、梯度升级、RFC3339 Z 时间戳解析。
+
+测试数据的一个教训值得记录：给本地 naive 时间戳硬加 `Z` 后缀会把它变成"未来时间"（UTC 解析比本地墙钟早 8 小时），导致静默值为负、永不告警——测试用例 K 用真正的 UTC 过去时间戳单独覆盖 Z 解析路径。
+
+真实 429 场景的端到端（Claude Code 触发 StopFailure → hook 投递 → supervisor 退避唤醒）尚未实测，首次实战使用时建议盯第一次触发。
