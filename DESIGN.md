@@ -74,7 +74,7 @@ InstructionsLoaded, CwdChanged, FileChanged, DirectoryAdded, MessageDisplay
 - **`StopFailure`**（2.1.259 存在）：turn 以失败结束（429 耗尽重试、网络错误、API 错误）时触发。stdin schema：`{hook_event_name, session_id, transcript_path, cwd, prompt_id, error, error_details, last_assistant_message}`。配套执行器 `executeStopFailureHooks`。**这是中断防御第一层的根基。**
 - `PostToolUseFailure`：单个工具调用失败后触发（粒度太细，且 429 发生在模型回合层而非工具层，不适用本场景）。
 - `Stop`：turn 正常结束。不能用于中断检测——它恰恰在失败时不触发。
-- `notify_when_idle`（control 帧 `peer_idle_notice`）：turn 结束的信号性通知。**不能作为中断检测**：错误结束的 turn 是否发 notice 未经验证；即便发，也只表达"停了"不携带原因；进程死亡时主体消失什么都发不出。**v2 起的新用法**：作为 worker 活性信号刷新 `last_response_ts`（idle ≠ 完成，不作督促触发器）——但订阅机制本身未实测，属假设性增益，不可用则整体回退。
+- `notify_when_idle`（control 帧 `peer_idle_notice`）：turn 结束的信号性通知。**不能作为中断检测**：错误结束的 turn 是否发 notice 未经验证；即便发，也只表达"停了"不携带原因；进程死亡时主体消失什么都发不出。**v2 起的新用法**：作为 worker 活性信号刷新 `last_response_ts`（idle ≠ 完成，不作督促触发器）。订阅机制已实测可用（2026-09-05 端到端实测记录①，见 9.8）；若未来版本机制变更失效，本用法整体回退，不影响其余条款。
 
 ### 2.4 明确不用的机制及原因
 
@@ -286,7 +286,7 @@ supervisor 启动时用 `CronCreate` 创建每 10 分钟的 session-only 巡检 
 
 ### 11.3 idle 活性信号
 
-supervisor 每次 SendMessage 附带 notify_when_idle 订阅，收到 idle 通知唯一动作是刷新 `last_response_ts`（宿主级硬证据：进程活着、回合正常结束）。**明确不用作督促触发器**：worker 协议本就是不干完里程碑不上报，长 Phase 中间每回合都 idle，按 idle 督促会按回合频率轰炸正在干活的 worker（CR P0-1 裁定）。是否督促只走既有 60 分钟失联判定，一套逻辑不双轨。⚠️ 订阅机制未实测，不可用则本节回退。
+supervisor 每次 SendMessage 附带 notify_when_idle 订阅，收到 idle 通知唯一动作是刷新 `last_response_ts`（宿主级硬证据：进程活着、回合正常结束）。**明确不用作督促触发器**：worker 协议本就是不干完里程碑不上报，长 Phase 中间每回合都 idle，按 idle 督促会按回合频率轰炸正在干活的 worker（CR P0-1 裁定）。是否督促只走既有 60 分钟失联判定，一套逻辑不双轨。订阅机制已实测通过（见 §9.8 实测记录①）；若未来版本机制变更失效，本节回退。
 
 ### 11.4 三层回答防火墙
 
