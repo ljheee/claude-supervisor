@@ -1,8 +1,8 @@
 # Spec: claude-supervisor v2 — 定时自巡检与对齐漏斗
 
 > 分支：`feat/v2-scheduled-supervision`
-> 依据：`../claude_cron.md`（Claude Code 2.1.259 定时任务机制实测记录）+ 2026-09-05 系列讨论
-> 状态：待评审
+> 依据：`claude_cron.md`（同目录，Claude Code 2.1.259 定时任务机制实测记录）+ 2026-09-05 系列讨论
+> 状态：已过子代理 CR（10 条全修）+ 作者终审修订，待用户终审
 
 ## 1. 背景与问题
 
@@ -25,6 +25,7 @@ v1 的 supervisor 是纯被动守卫：只在被消息/用户输入唤醒时顺�
 - 不考虑 cron 被禁用的降级路径（前提建立在有 cron 之上）。
 - 不考虑超过 3 天仍未完成目标的长项目场景（7 天 cron 过期远超该边界）。
 - 不改 hook 脚本（worker-stopfailure.py）、watchdog.sh、install.sh 的现有逻辑。
+- **不做 tick.md 心跳（原始提案之一，显式裁决）**：提案初衷是 worker 每次工具调用后写时间戳供 supervisor 检查活性。裁决：idle 活性信号（回合级宿主硬信号）+ 60 分钟失联判定已覆盖同目的，PostToolUse hook 落盘的粒度增量（工具级 vs 回合级）对 60 分钟阈值无意义，且新增 hook 维护成本。若未来失联阈值需要分钟级精度，再重启此提案。
 
 ## 4. 架构定位
 
@@ -56,7 +57,7 @@ v1 的 supervisor 是纯被动守卫：只在被消息/用户输入唤醒时顺�
 
 - **必须 session-only（durable=false，默认值）**：durable 会带来 worker 同目录接管执行巡检 prompt 的污染风险（claude_cron.md §三）。执行者永远只有 supervisor 自己。
 - **幂等【P1-4 修订】**：创建前先 `CronList` 查重（prompt 含监工巡检标识的已存在任务即跳过，不重建）——/supervisor 协议重注入是既定的漂移恢复手段，重跑启动步骤不得产生双 cron。
-- 巡检 prompt 内容 = 现有巡检三步（失联判定 / pending_check 结算 / 中断补课）+ CronList 自查（任务消失则重建——crons 会自动过期，重建是例行动作不是异常）。
+- 巡检 prompt 内容 = 现有巡检三步（失联判定 / pending_check 结算 / 中断补课）+ CronList 自查（任务消失则重建——crons 会自动过期，重建是例行动作不是异常）+ 显式声明"这是持久例行动作，除非收到 CronDelete 收尾指令否则每轮照常执行"（防 /loop 动态模式的 noop 自主熔断语义迁移到固定 cron，见 claude_cron.md §五）。
 - **noop 纪律**：无事项时只输出一行"巡检正常，无待办"，不发消息不做长报告。每次 tick 都消耗 supervisor 上下文，长篇例行输出会加速协议淡化。
 - cron 触发"等当前回合结束才注入"（⚠️ 二进制证据未直接观测），不违反被动守卫（不插队正在进行的审查）。
 - **被动守卫红线同步修订【P1-1 修订】**：行为红线"不在没有 worker 通知时主动轮询"改写为"定时巡检 cron 的检查是唯一例外；tick 无事时零消息零长输出"。
@@ -97,7 +98,7 @@ worker.md 的提问协议升级：向 supervisor 发送待确认问题时，每�
 supervisor.md 收到问题包的三分支：
 
 1. goal内：直接回答，不打扰用户。
-2. 监工职权：裁决并回答，决策记入 state.json（reviews 或新增 decisions 字段），总结报告时向用户披露。
+2. 监工职权：裁决并回答，决策记入 state.json 新增 `decisions` 字段，总结报告时向用户披露。
 3. 需用户：汇总后在自己终端问真用户，拿到答案回传。攒批提问，避免挤牙膏式打扰。
 
 红线不变：破坏性操作的用户授权请求不许转发给 supervisor 代答（worker 直接问用户）。
@@ -147,6 +148,7 @@ supervisor.md 收到问题包的三分支：
 | cron 7 天过期后静默消失 | 巡检 prompt 内置 CronList 自查+重建（F1） |
 | /supervisor 重注入产生双 cron | 启动步骤先 CronList 查重（F1 幂等）【P1-4】 |
 | notify_when_idle 订阅机制不可用（未实测假设） | F3 已降级为纯增益信号，不可用则整体删除不伤主链路【P2-3】 |
+| idle 消息消耗 supervisor 上下文（worker 每回合一条注入）【终审新增】 | 订阅机制若实测确认，可评估仅长 phase 订阅；接受度不适再回退 F3 |
 | ScheduleWakeup 唤醒 prompt 丢上下文 | prompt 自包含 + arm 前落账（F2）【P1-3】 |
 | 质询两轮上限被模型忽略 | 上限写成硬规则并挂 Loop Guard 同款措辞 |
 | 协议自相矛盾（被动守卫 vs 定时巡检） | 红线同步修订为"定时巡检是唯一例外"【P1-1】 |
