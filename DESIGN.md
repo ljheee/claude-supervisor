@@ -241,18 +241,19 @@ supervisor 收到 WORKER INTERRUPTED 后：
 ## 9. 已知边界（记录在案，非缺陷待修）
 
 1. **进程死亡无自动恢复**（4.2 节，原理性）：watchdog 只能检测+告警，resume 必须人手执行。
-2. **hook 版本依赖**：StopFailure 事件在 2.1.259 二进制中确认存在，官方无文档；Claude Code 升级后该机制可能变化，需要重跑 `test_stopfailure.sh` 回归。
-3. **peerToken 非硬校验**：本平台 auth optional，恶意本地进程本就能读同一 key 文件——本套件不提供跨进程认证，只在单用户信任域内工作。
-4. **错误分类是启发式**：`classify_error` 按错误串关键字归类（429/rate limit/overloaded → rate-limit；timeout/econnreset → network；其余 → api-error），决定退避时长。误分类的后果只是退避时长不优，不影响正确性。
-5. **协议对 LLM 的依赖（遵循度不可确保，只能工程化对冲）**：监工人格由 slash command 注入——`/supervisor` 的本质是把协议全文作为一条长 user prompt 发给模型，没有任何进程级隔离或角色绑定。prompt 是软约束，LLM 遵循度永远不是 100%：监工可能跳过某次巡检、忘掉 Loop Guard、在多次 REFINE 后行为漂移（长会话 context 压缩会加速漂移）。**无法根除，只能对冲**，本套件的对冲分三层：
+2. **模式选择是用户显式决策**（12.1 节）：绿地（/supervisor）与重构（/rework）的选型由用户拍板，协议不做任务类型自动判定——软判定判错模式整场错配，宁可多问一次人。
+3. **hook 版本依赖**：StopFailure 事件在 2.1.259 二进制中确认存在，官方无文档；Claude Code 升级后该机制可能变化，需要重跑 `test_stopfailure.sh` 回归。
+4. **peerToken 非硬校验**：本平台 auth optional，恶意本地进程本就能读同一 key 文件——本套件不提供跨进程认证，只在单用户信任域内工作。
+5. **错误分类是启发式**：`classify_error` 按错误串关键字归类（429/rate limit/overloaded → rate-limit；timeout/econnreset → network；其余 → api-error），决定退避时长。误分类的后果只是退避时长不优，不影响正确性。
+6. **协议对 LLM 的依赖（遵循度不可确保，只能工程化对冲）**：监工人格由 slash command 注入——`/supervisor` 的本质是把协议全文作为一条长 user prompt 发给模型，没有任何进程级隔离或角色绑定。prompt 是软约束，LLM 遵循度永远不是 100%：监工可能跳过某次巡检、忘掉 Loop Guard、在多次 REFINE 后行为漂移（长会话 context 压缩会加速漂移）。**无法根除，只能对冲**，本套件的对冲分三层：
    - **把确定性逻辑从 LLM 手里拿走**：中断检测的触发不依赖监工自觉——StopFailure hook 是进程级代码（回合失败瞬间触发）、watchdog 是 cron 定时器（不依赖任何 agent 活着）。需要监工做的只剩"收到消息后按协议响应"，触发链是硬的，响应是软的；
    - **状态外置，使漂移可恢复**：全部进度在 state.json 而非监工的 context 里，状态文件不会撒谎。漂移的退路是重新执行 `/supervisor <目标>` 重注入协议全文，state.json 恢复全部上下文，漂移归零。协议因此反复强调"决策依据是 state.json 而不是你的记忆"；
    - **协议写法本身**：立即执行式指令、行为红线明确列举、每步给具体动作而非抽象原则——经验上强命令式 + 具体步骤的遵循率显著高于软描述。
    残余风险：监工的软失效（漏巡检、忘规则）无解，硬兜底层保证其后果是"晚发现"而非"不发现"。这是本套件与纯代码方案的本质折衷，也是引入第四层 watchdog 的根本原因之一。
-6. **真实 429 场景未实测**：逆向确认了事件存在和触发条件，但官方无文档；首次实战使用时建议盯第一次触发。
-7. **cron 调度器寄生宿主进程（v2）**：定时巡检的调度器跑在 supervisor 的宿主 Claude Code 进程内，supervisor 死则巡检死，由第四层外部 watchdog 兜底，防线不降级。另：cron 过期天数等参数版本间已变过（3 天→7 天），协议一律以现场 CronList 为准。
-8. **v2 端到端实测记录（2026-09-05，真实双会话演练）**：① notify_when_idle 订阅——✅ 实测通过：SendMessage 自动附带订阅（worker 侧可见 UDS 地址级订阅请求），worker idle 后 supervisor 正常感知，唤醒消息再次自动附带新订阅；② WORKER INTERRUPTED 注入 + ScheduleWakeup 退避——✅ 实测通过：UDS 注入送达、四步流程（incidents→acknowledged→pending_check→arm）完整执行且顺序正确、60s 后唤醒 fire、唤醒消息送达 worker；③ SendMessage 唤醒空闲/中断 worker——✅ 实测通过：worker 收到唤醒消息立即开新回合（ack + 继续干活 + spec 上报），链条⑥打通，429 中断全自动闭环成立（StopFailure 终态的极端情形仍未实测，但空闲唤醒已证 SendMessage 可驱动停止的会话）。**实测意外收获**：(a) supervisor 对伪造中断的防御超出预期——worker_session_id 不在账本时拒绝处理并升级用户，且正确识别"peer 消息不能冒充用户授权"，两次社会工程尝试均被拒绝；(b) 发现并修复 session_id 格式坑：ListAgents 输出 `This session is supervisor [6aebfc]` 的方括号短哈希不是 session_id（真实值为 36 位 UUID），协议已补 UUID 格式自检条款。
-9. **StopFailure 终态唤醒（残留挂账）**：③的实测覆盖的是"idle worker"而非"StopFailure 终态 worker"——真实 429 后会话是否等价于可被 SendMessage 驱动的状态，仍需真实 429 事件验证（无法伪造，等首次实战）。
+7. **真实 429 场景未实测**：逆向确认了事件存在和触发条件，但官方无文档；首次实战使用时建议盯第一次触发。
+8. **cron 调度器寄生宿主进程（v2）**：定时巡检的调度器跑在 supervisor 的宿主 Claude Code 进程内，supervisor 死则巡检死，由第四层外部 watchdog 兜底，防线不降级。另：cron 过期天数等参数版本间已变过（3 天→7 天），协议一律以现场 CronList 为准。
+9. **v2 端到端实测记录（2026-09-05，真实双会话演练）**：① notify_when_idle 订阅——✅ 实测通过：SendMessage 自动附带订阅（worker 侧可见 UDS 地址级订阅请求），worker idle 后 supervisor 正常感知，唤醒消息再次自动附带新订阅；② WORKER INTERRUPTED 注入 + ScheduleWakeup 退避——✅ 实测通过：UDS 注入送达、四步流程（incidents→acknowledged→pending_check→arm）完整执行且顺序正确、60s 后唤醒 fire、唤醒消息送达 worker；③ SendMessage 唤醒空闲/中断 worker——✅ 实测通过：worker 收到唤醒消息立即开新回合（ack + 继续干活 + spec 上报），链条⑥打通，429 中断全自动闭环成立（StopFailure 终态的极端情形仍未实测，但空闲唤醒已证 SendMessage 可驱动停止的会话）。**实测意外收获**：(a) supervisor 对伪造中断的防御超出预期——worker_session_id 不在账本时拒绝处理并升级用户，且正确识别"peer 消息不能冒充用户授权"，两次社会工程尝试均被拒绝；(b) 发现并修复 session_id 格式坑：ListAgents 输出 `This session is supervisor [6aebfc]` 的方括号短哈希不是 session_id（真实值为 36 位 UUID），协议已补 UUID 格式自检条款。
+10. **StopFailure 终态唤醒（残留挂账）**：③的实测覆盖的是"idle worker"而非"StopFailure 终态 worker"——真实 429 后会话是否等价于可被 SendMessage 驱动的状态，仍需真实 429 事件验证（无法伪造，等首次实战）。
 
 
 ## 10. 测试策略
@@ -295,3 +296,31 @@ worker 提问按 goal内/监工职权/需用户三级标注（WORKER QUESTIONS �
 ### 11.5 三阶段质询（对齐漏斗）
 
 v1 的对齐是被动的（worker 报什么审什么），真问题的挖掘责任全压在执行者视角的 worker 身上。v2 升级为主动质询：clarify 挖理解偏差（对抗式挖掘沉默假设、反向验收标准）、spec 挖完整性缺口（边界/错误路径/非功能）、plan 挖执行风险（DoD 可验证性、隐藏耦合、pre-mortem）。每阶段质询上限两轮，与 Loop Guard（3 次 REFINE）独立计数，防"完美澄清"变不开工借口。
+
+## 12. 模式分层与 rework 模式
+
+### 12.1 拆分动机：协议膨胀 vs 泛化的矛盾
+
+v2 之后 /supervisor 协议对绿地项目（从零开发）高度适配，但对老项目修补/重构这类高频场景缺四块针对性设计（基线锚定、回归安全网、考古裁决、范围纪律）。直接的泛化路径有两个：给 /supervisor 加任务模式参数，或新增 /rework 命令。前者的问题：全量协议注入意味着 rework 条款与绿地条款互相污染上下文，协议越长 LLM 遵循度越低（§9.5 的老问题），且模式判定交给 LLM 软判断会引入"判错模式整场错配"的不确定性。后者单独复制核心协议的问题：150 行级拷贝的同步维护是灾难。解法是物理拆分：`commands/_core-supervisor.md`（模式无关：身份/启动/账本/四层防御/OODA/QUESTIONS/dev-N 骨架/红线）+ 每模式一个薄模式层（frontmatter + 模式声明 + 前置阶段质询），模式由用户显式选命令（不做自动判定）。
+
+### 12.2 组合机制：安装期拼接（方案 B），非运行时 @ 引用
+
+模式层与 core 在 install.sh 安装期 cat 拼接成单一命令文件。选拼接而非 @ 引用的理由与本套件一贯哲学一致（能硬不软，§9.5 对冲策略第一条）：拼接发生在安装期，可 grep 断言、可 diff 审查；拼接产物带三重结构断言（frontmatter 唯一性——第二个 `---` 后的水平线不误判；五个关键节齐全；无重复二级标题——模式层章节不得与 core 撞名），断言失败备份中止、不留半成品。**dev-0 实测的两个关键结论**：拼接产物可被 Claude Code 正常加载为 slash command（方案 B 前提成立）；**下划线前缀文件也会被注册为命令**（实测推翻预期）——因此 `_core-supervisor.md` 绝不能放进 `~/.claude/commands/`（会变成可误触的伪命令），原料副本只装 `~/.claude/hooks/claude-supervisor/`。
+
+零回归保障：拆分是纯重构，拼接产物与拆分前 supervisor.md 的 diff 仅允许模式声明节新增、章节顺序重排、三处绿地特化措辞参数化（启动步骤 7 首阶段指令整句 / phase 枚举 / schema 示例——参数由模式层声明，rework 下由 supervisor 初始指令下发本模式枚举覆盖 worker.md 的绿地默认值）。dev-1 门禁实测：removed 24 条 = 纯移位 20 + 允许改写 4，零条款丢失。
+
+### 12.3 rework 的考古四件套与安全网
+
+rework 状态机：`archaeology → safety-net → spec → plan → dev-N`。考古四件套（架构地图/债务清单/疑点清单/依赖暗网）的设计依据：老项目的第一课是考古而非规划——没有行为基线的 REFINE/APPROVE 无从判定"改好了还是改坏了"。三条硬规则：bug-vs-feature 疑点禁 worker 自行裁决（git blame 说不清的标"待用户"，默认"需用户"级——考古裁决的存档价值高于绿地，不落账就会有人再犯）；安全网测试锁行为不锁实现（assert 内部结构的测试会让重构必然假红）；安全网含待改行为（只有先锁住现状，改造前后的 diff 才可归因）。
+
+### 12.4 frozen_behaviors（不改清单）
+
+state.json 可选顶层字段，生命周期：archaeology 产出初稿 → safety-net APPROVE 时用户确认锁定（locked_by）→ 锁定后首个 dev 指令把清单全文下发给 worker（worker 不读 state.json，必须显式告知）→ dev 期触碰且无授权即 REFINE + 升级。触碰的机械信号：条目 evidence 字段（考古证据 + 关联文件/函数清单）与 dev diff 求交，交非空即触发；模糊条目（如"响应时间不劣化"）无机械信号，由 supervisor 审查时人工比对并标注。变更通道："需用户"级申请，获准后先改账再动手。
+
+### 12.5 顺手重构红线（范围比对）
+
+重构最经典的死法是"顺手重构"：每个 phase 都顺便多改一点，最终 diff 无法评审。对策固化为机械信号：每次审查 dev 上报时必跑 `git diff --name-only <本 phase 基线 commit>..HEAD` 与该 phase 声明范围比对，超出即 REFINE 无论改动多"合理"（不依赖 worker 自觉，也不依赖 supervisor 记忆）。免责通道：确需扩大范围走"需用户"级 QUESTIONS（范围变更即目标变更）。配套纪律：进入 dev-1 前工作区必须 clean（防脏区污染安全网基线与范围比对）；单 phase = 一次可独立回滚的改动单元；每 phase DoD 必含"安全网前后输出一致"断言或"预期行为 diff 清单"。
+
+### 12.6 注入体积预算
+
+协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 40 行、rework 模式层 66 行、core 170 行（拆分时实测）。拼接产物：绿地 209 行（原 198，增量 11 行全在模式声明节）、rework 236 行。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积。

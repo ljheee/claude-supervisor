@@ -2,6 +2,8 @@
 
 基于 Claude Code 跨会话消息（Cross-session messaging）的项目监工套件：一个 Supervisor 会话督促并审查 N 个 Worker 会话，把「需求澄清 → spec → plan → 逐 Phase 开发 → 总结」的全流程管起来，worker 中断（429/网络/进程死亡）也不会静默失联。
 
+支持两种模式：**绿地模式**（`/supervisor`，从零开发新项目）与 **rework 模式**（`/rework`，老项目修补/重构——考古基线 + 回归安全网 + 不改清单）。
+
 设计原理、逆向依据、中断模型 → 见 [DESIGN.md](DESIGN.md)。本文只讲怎么用。
 
 ## 安装
@@ -10,7 +12,7 @@
 bash install.sh
 ```
 
-安装内容：`/supervisor`、`/worker` 两个 slash 命令（→ `~/.claude/commands/`）；StopFailure hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json`，幂等）；watchdog 脚本（→ `~/.agent-mail/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置。
+安装内容：`/supervisor`、`/rework`、`/worker` 三个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；StopFailure hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json`，幂等）；watchdog 脚本（→ `~/.agent-mail/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言（关键节齐全/无重复标题），断言失败同样中止不留半成品。
 
 版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。
 
@@ -30,6 +32,24 @@ cd /path/to/repo && claude
 ```
 
 之后你只需要跟 supervisor 会话对话（进度询问、需求澄清的回答都在它终端）；worker 按指令干活、自 CR、上报。supervisor 靠 session_id 识别每个 worker（注册时自动解析，重名/改名不串扰），你不用管细节。
+
+## 老项目修补/重构（rework 模式）
+
+有存量代码要改？用 `/rework` 代替 `/supervisor`，同一姿势：
+
+```bash
+# 终端A：老项目目录（必须是 git 仓库）
+claude
+> /rework 修复XX模块的YY问题 --baseline <行为正常的commit>
+
+# 终端B：同一项目目录
+claude
+> /worker
+```
+
+rework 模式的前置阶段是「考古与基线 → 回归安全网 → spec → plan」：先考古出架构地图、债务清单、bug-vs-feature 疑点（禁 worker 自行裁决，默认升级用户）、依赖暗网；再锁定当前行为的安全网测试（含待改行为——先锁现状，改造前后 diff 才可归因）；「不改清单」（frozen_behaviors）在安全网 APPROVE 时由你确认锁定，之后 worker 任何 commit 触碰即 REFINE。开发期有两条硬纪律：**范围比对**（每 phase 的 diff 文件集 ⊆ 声明范围，超出即 REFINE——顺手重构零容忍）与**单 phase = 一次可独立回滚的改动单元**。`--baseline` 缺省 HEAD。
+
+注意：rework 模式要求项目是 git 仓库（考古硬依赖 git 历史，非 git 目录会直接 ESCALATE）。
 
 ## 你会看到什么流程
 
@@ -76,11 +96,15 @@ crontab -e
 
 ## 命令
 
-- `/supervisor <目标> [--project-dir DIR]`：把当前会话变成监工。已含完整协议（OODA、状态机、四层中断防御）。
-- `/worker [--supervisor NAME]`：把当前会话注册成受监工的工人。已含上报协议与中断恢复协议。
+- `/supervisor <目标> [--project-dir DIR]`：绿地开发模式监工（前置阶段 clarify→spec→plan）。
+- `/rework <改造目标> [--project-dir DIR] [--baseline <git-ref>]`：老项目修补/重构模式监工（前置阶段 archaeology→safety-net→spec→plan，含不改清单与顺手重构红线）。
+- `/worker [--supervisor NAME]`：把当前会话注册成受监工的工人（模式无关）。已含上报协议与中断恢复协议。
+
+两模式共享同一份核心协议（身份/四层中断防御/账本/OODA/三层回答防火墙），由 install.sh 在安装期拼接进各自命令。
 
 ## 常见问题
 
+- **绿地/重构拿不准用哪个**：有存量代码要改就用 `/rework`（考古+安全网前置）；从零开始用 `/supervisor`。
 - **worker 找不到 supervisor**：supervisor 终端执行 `/rename supervisor` 固定名字后 worker 重试；同时确认两边在预期目录。
 - **supervisor 行为漂移**（长会话被压缩后协议淡化）：重新执行 `/supervisor <目标>` 重注入协议，state.json 会恢复全部上下文。
 - **监工不是 100% 可靠（已知边界）**：监工人格来自 prompt 注入，遵循度无法确保。本套件的对冲：中断检测的触发（hook/watchdog）是硬代码不依赖监工自觉；进度全在 state.json 里，漂移可重注入恢复；软失效（漏巡检等）的后果被硬兜底层限制为"晚发现"而非"不发现"。详见 DESIGN.md 第 9 节。
@@ -90,7 +114,7 @@ crontab -e
 ## 卸载
 
 ```bash
-rm ~/.claude/commands/supervisor.md ~/.claude/commands/worker.md
+rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/worker.md
 rm -rf ~/.claude/hooks/claude-supervisor
 rm ~/.agent-mail/supervisor-watchdog
 # 并从 ~/.claude/settings.json 的 hooks.StopFailure 数组中删掉对应条目
@@ -100,7 +124,9 @@ rm ~/.agent-mail/supervisor-watchdog
 
 | 文件 | 用途 |
 |---|---|
-| `commands/supervisor.md` | /supervisor 命令（监工协议） |
+| `commands/_core-supervisor.md` | 核心协议片段（拼接原料，不单独安装） |
+| `commands/supervisor.md` | /supervisor 绿地模式层（安装期与 core 拼接） |
+| `commands/rework.md` | /rework 重构模式层（安装期与 core 拼接） |
 | `commands/worker.md` | /worker 命令（工人协议） |
 | `hooks/worker-stopfailure.py` | StopFailure hook（中断自动上报） |
 | `watchdog.sh` | 外部逾期巡检脚本 |
