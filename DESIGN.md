@@ -244,7 +244,11 @@ supervisor 收到 WORKER INTERRUPTED 后：
 2. **hook 版本依赖**：StopFailure 事件在 2.1.259 二进制中确认存在，官方无文档；Claude Code 升级后该机制可能变化，需要重跑 `test_stopfailure.sh` 回归。
 3. **peerToken 非硬校验**：本平台 auth optional，恶意本地进程本就能读同一 key 文件——本套件不提供跨进程认证，只在单用户信任域内工作。
 4. **错误分类是启发式**：`classify_error` 按错误串关键字归类（429/rate limit/overloaded → rate-limit；timeout/econnreset → network；其余 → api-error），决定退避时长。误分类的后果只是退避时长不优，不影响正确性。
-5. **协议对 LLM 的依赖**：supervisor 是 LLM，state.json 原子写、interrupts 补课、pending_check 结算都写在协议里靠它自觉执行——协议明确性是唯一的保证手段。这是本套件与纯代码方案的本质折衷。
+5. **协议对 LLM 的依赖（遵循度不可确保，只能工程化对冲）**：监工人格由 slash command 注入——`/supervisor` 的本质是把协议全文作为一条长 user prompt 发给模型，没有任何进程级隔离或角色绑定。prompt 是软约束，LLM 遵循度永远不是 100%：监工可能跳过某次巡检、忘掉 Loop Guard、在多次 REFINE 后行为漂移（长会话 context 压缩会加速漂移）。**无法根除，只能对冲**，本套件的对冲分三层：
+   - **把确定性逻辑从 LLM 手里拿走**：中断检测的触发不依赖监工自觉——StopFailure hook 是进程级代码（回合失败瞬间触发）、watchdog 是 cron 定时器（不依赖任何 agent 活着）。需要监工做的只剩"收到消息后按协议响应"，触发链是硬的，响应是软的；
+   - **状态外置，使漂移可恢复**：全部进度在 state.json 而非监工的 context 里，状态文件不会撒谎。漂移的退路是重新执行 `/supervisor <目标>` 重注入协议全文，state.json 恢复全部上下文，漂移归零。协议因此反复强调"决策依据是 state.json 而不是你的记忆"；
+   - **协议写法本身**：立即执行式指令、行为红线明确列举、每步给具体动作而非抽象原则——经验上强命令式 + 具体步骤的遵循率显著高于软描述。
+   残余风险：监工的软失效（漏巡检、忘规则）无解，硬兜底层保证其后果是"晚发现"而非"不发现"。这是本套件与纯代码方案的本质折衷，也是引入第四层 watchdog 的根本原因之一。
 6. **真实 429 场景未实测**：逆向确认了事件存在和触发条件，但官方无文档；首次实战使用时建议盯第一次触发。
 
 ## 10. 测试策略

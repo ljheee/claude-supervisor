@@ -77,6 +77,7 @@ crontab -e
 
 - **worker 找不到 supervisor**：supervisor 终端执行 `/rename supervisor` 固定名字后 worker 重试；同时确认两边在预期目录。
 - **supervisor 行为漂移**（长会话被压缩后协议淡化）：重新执行 `/supervisor <目标>` 重注入协议，state.json 会恢复全部上下文。
+- **监工不是 100% 可靠（已知边界）**：监工人格来自 prompt 注入，遵循度无法确保。本套件的对冲：中断检测的触发（hook/watchdog）是硬代码不依赖监工自觉；进度全在 state.json 里，漂移可重注入恢复；软失效（漏巡检等）的后果被硬兜底层限制为"晚发现"而非"不发现"。详见 DESIGN.md 第 9 节。
 - **怀疑 hook 没生效**：跑 `bash test_stopfailure.sh` 和 `bash test_watchdog.sh` 回归（断言型沙箱测试，不碰真实数据）；真实中断后查 `.supervisor/interrupts.jsonl` 有无新条目。
 - **想跨 Codex 用**：本套件的消息通道是 Claude↔Claude 官方机制；Codex worker 可改用 agent-mail 桥上报（两套件互补）。
 
