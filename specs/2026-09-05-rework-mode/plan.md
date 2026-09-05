@@ -44,7 +44,7 @@
 ### 步骤
 
 1. 新建 `commands/_core-supervisor.md`：按 spec F1 抽取清单从现 supervisor.md 搬运模式无关章节。头部加片段声明："本文件是核心协议片段，由 install.sh 拼接进模式命令，不是独立 slash command，不要直接执行。"搬运纪律：**逐字搬运，不改措辞**（含"见启动步骤第 6 步"等交叉引用——引用目标在 core 内部，拼接后仍然成立）；【CR P0-1】例外仅三处绿地特化措辞的参数化改写（首阶段名/phase 枚举/schema 示例，见 spec F1，改写后语义等价）；【CR P1-5】total_phases 锁定句从绿地 plan 节提炼为 core 通用条款。
-2. 改写 `commands/supervisor.md` 为绿地模式层：保留 frontmatter；新增"模式声明"节（一句话：本命令为绿地开发模式，前置阶段为 clarify→spec→plan，核心协议见下方拼接部分——拼接后此话术自然成立）；【CR P1-3】模式声明节同时声明本模式的 phase 枚举与首阶段（初始指令下发时以此覆盖 worker.md 的绿地默认枚举）；保留 clarify/spec/plan 三节质询清单（这三节从原文搬出但**留在模式层**，且 plan 节删除已提炼入 core 的 total_phases 锁定句）；【CR P0-2】模式层不得使用与 core 同名的二级标题；其余引用 core 的章节删除（拼接时由 core 补齐）。
+2. 改写 `commands/supervisor.md` 为绿地模式层：保留 frontmatter；新增"模式声明"节（一句话：本命令为绿地开发模式，前置阶段为 clarify→spec→plan，核心协议见下方拼接部分——拼接后此话术自然成立）；【CR P1-3】模式声明节同时声明本模式的 phase 枚举与首阶段指令全文（初始指令下发时以此覆盖 worker.md 的绿地默认枚举；首阶段指令=原第 7 步整句"进入 Phase 0 需求澄清，产出理解/假设/待确认问题清单后上报"）；保留 clarify/spec/plan 三节质询清单（这三节从原文搬出但**留在模式层**，且 plan 节删除已提炼入 core 的 total_phases 锁定句）；【CR P0-2】模式层不得使用与 core 同名的二级标题（原"阶段状态机"大节被拆：绿地层的前置阶段小节需新标题如"前置阶段（绿地）"，core 保留 dev-N 骨架）；其余引用 core 的章节删除（拼接时由 core 补齐）。
 3. 临时拼接验证（正式拼接逻辑 dev-3 才写，此处手工 cat）：`cat supervisor.md _core-supervisor.md > /tmp/splice-check.md`。
 4. **diff 审查（本 Phase 核心门禁）**：`diff` 拼接产物与 git HEAD 的 supervisor.md，允许差异仅限：新增模式声明节、章节顺序重排、frontmatter 后的分隔标题、【CR P0-1】三处参数化改写。逐条核对语义条款零丢失零弱化。
 5. 记录拆分后行数：绿地模式层 + core 行数（供 dev-5 汇总注入体积预算）。
@@ -65,7 +65,7 @@
 ### 步骤
 
 1. 新建 `commands/rework.md`：frontmatter（description + `argument-hint: <改造目标> [--project-dir DIR] [--baseline <git-ref>]`）。
-2. 模式声明节：本命令为老项目修补/重构模式，前置阶段为 archaeology→safety-net→spec→plan，核心协议见下方拼接部分；--baseline 参数语义（缺省 HEAD，不可解析时向用户要新锚点）。
+2. 模式声明节：本命令为老项目修补/重构模式，前置阶段为 archaeology→safety-net→spec→plan，核心协议见下方拼接部分；--baseline 参数语义（缺省 HEAD，不可解析时向用户要新锚点）；【作者终审 P1】模式声明节声明首阶段指令全文（archaeology 的产出要求：架构地图/债务清单/疑点清单/依赖暗网四件，按 WORKER REPORT 模板上报）；【作者终审 P2】含 git 仓库前置断言（非 git 目录 ESCALATE）。
 3. **archaeology 节**：阶段定义 + 产出四件（架构地图/债务清单/疑点清单/依赖暗网）+ spec F2 的四条质询（每条≤一行命令句）+ 疑点裁决默认"需用户"级条款。
 4. **safety-net 节**：阶段定义（锁定当前行为，含待改行为）+ 三条质询（锁行为不锁实现/覆盖面口径/可追溯性）+ 无框架时允许脚本级断言。
 5. **spec/plan 特化节**：变更差集声明格式（旧行为 X → 新行为 Y，禁"优化XX"）、phase DoD 二选一断言（安全网一致 / 预期 diff 清单）、单 phase = 一次可回滚单元、pre-mortem 换问法（隐性契约版）。
@@ -80,7 +80,8 @@
 - [ ] 质询条款全部命令式，无"适当/尽量"类模糊词（grep 自查）
 - [ ] frozen_behaviors schema 与 spec F3 逐字段一致，含锁定时点与告知机制条款
 - [ ] rework 模式层 ≤80 行（wc -l，不含拼接的 core 部分）【CR P1-6 放宽自 60】
-- [ ] 分级定义引用 core 原文不新造措辞；模式声明含 phase 枚举覆盖与 120 分钟时限声明【CR P1-3/P2-14】
+- [ ] 分级定义引用 core 原文不新造措辞；模式声明含 phase 枚举覆盖、首阶段指令全文与 120 分钟时限声明【CR P1-3/P2-14/作者终审 P1】
+- [ ] 模式声明含 git 仓库前置断言【作者终审 P2】
 - [ ] --baseline 失败分支存在（不可解析 → 问用户）
 - [ ] 模式层无与 core 同名二级标题（grep 校验）
 

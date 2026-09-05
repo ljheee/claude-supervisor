@@ -56,7 +56,7 @@ archaeology（考古与基线）→ safety-net（回归安全网）→ spec（�
 
 抽取清单（从现 supervisor.md 197 行中）：
 - 身份与核心原则（被动守卫、用户唯一权威、session_id 主键）；
-- 启动步骤 1–7 全部（含巡检 cron 创建、session_id UUID 自检），但【CR P0-1】**参数化三处绿地特化措辞**：第 7 步"进入 Phase 0 需求澄清"改为"进入模式声明的首阶段"；WORKER REPORT 模板的 phase 枚举 `<clarify|spec|plan|dev-N>` 改为"<本模式前置阶段枚举|dev-N>"（枚举由模式层声明）；schema 示例 `"phase": "clarify"` 改为 `"phase": "<首阶段名>"`（展开后语义与原文等价）；
+- 启动步骤 1–7 全部（含巡检 cron 创建、session_id UUID 自检），但【CR P0-1】**参数化三处绿地特化措辞**：① 第 7 步"当前阶段指令：进入 Phase 0 需求澄清，产出理解/假设/待确认问题清单后上报"——**整句**（不只前半句）改为"当前阶段指令：进入模式声明的首阶段，按该阶段的产出要求上报"（【作者终审 P1：后半句产出要求同样是 clarify 特化，必须一并参数化；模式层必须声明首阶段指令全文——绿地层保留原句，rework 层声明考古产出要求）；② WORKER REPORT 模板的 phase 枚举 `<clarify|spec|plan|dev-N>` 改为"<本模式前置阶段枚举|dev-N>"（枚举由模式层声明）；③ schema 示例 `"phase": "clarify"` 改为 `"phase": "<首阶段名>"`（展开后语义与原文等价）；
 - 全局状态 schema（含 decisions 字段与 frozen_behaviors 可选字段）与原子写纪律、身份主键规则、多 worker 规则、Loop Guard；
 - 四层防御全部（StopFailure 处理四步、STALLED/RESUME/STATUS/idle 通知、巡检三步、watchdog）；
 - OODA 循环、WORKER QUESTIONS 三层回答；
@@ -67,10 +67,12 @@ archaeology（考古与基线）→ safety-net（回归安全网）→ spec（�
 
 约束：
 - core 文件头部声明："本文件是核心协议片段，由 install.sh 拼接进模式命令，不是独立 slash command，不要直接执行"；
-- 【零回归硬约束】拼接（绿地模式层 + core）与拆分前 supervisor.md 的 diff **仅允许**：模式声明节新增、章节顺序重排、【CR P0-1】三处绿地特化措辞的参数化改写（展开后语义等价）——除允许项外语义条款一条不减、不弱化、不改措辞（纯搬运）；
+- 【零回归硬约束】拼接（绿地模式层 + core）与拆分前 supervisor.md 的 diff **仅允许**：模式声明节新增、章节顺序重排、【CR P0-1】三处绿地特化措辞的参数化改写（含第 7 步首阶段指令整句，展开后语义与原文等价）——除允许项外语义条款一条不减、不弱化、不改措辞（纯搬运）；
 - core 不含 frontmatter（拼接时追加在模式层之后）。
 
 ### F2 rework 状态机与各阶段质询
+
+**启动前置断言【作者终审 P2】**：/rework 启动步骤第 1 步校验 project-dir 是 git 仓库（存在 .git 且 `git log` 可解析）——考古四件套硬依赖 git 历史，非 git 目录直接 ESCALATE 用户（绿地可以 git init，老项目不能 init 出历史）。
 
 **archaeology（考古与基线）**——对应绿地 clarify 的位置，产出四件：架构地图（改造目标面的模块/数据流）、债务清单、bug/feature 疑点清单、依赖暗网（上下游）。质询条款（命令式）：
 
@@ -98,7 +100,7 @@ archaeology（考古与基线）→ safety-net（回归安全网）→ spec（�
 
 ### F3 不改清单（frozen_behaviors）
 
-- state.json 新增**可选**顶层字段：`"frozen_behaviors": [{"id", "desc", "evidence", "locked_by", "ts"}]`（hook/watchdog 不读该字段，无兼容风险；绿地模式不写该字段）；
+- state.json 新增**可选**顶层字段：`"frozen_behaviors": [{"id", "desc", "evidence", "locked_by", "ts"}]`（hook/watchdog 不读该字段，无兼容风险；绿地模式不写该字段）；【作者终审 P2】`evidence` 字段语义显式定义：考古证据 + **关联文件/函数清单**（后者供触碰检测的机械信号用，见下）；
 - 【CR P1-4】锁定时点显式化：**safety-net 阶段 APPROVE 时**，supervisor 把 archaeology 初稿汇总成 frozen 清单向用户确认，用户确认后写入 locked_by 字段完成锁定——锁定前 frozen 仅是"初稿"状态，worker 触碰初稿条目的行为不判违规（但 spec 审查时逐条核对该触碰是否已被改造规格声明覆盖，未覆盖的退回 archaeology 补裁决）；
 - 【CR P1-4】告知机制：锁定后 supervisor 在首个 dev 指令中把 frozen 清单全文下发给 worker（worker 不读 state.json，必须显式告知）；
 - 【CR P1-4】"触碰"的机械信号：沿用 F4 的 diff 范围比对——frozen 条目关联的文件/函数清单（evidence 字段记录）与每次 dev diff 求交，交非空即触发 REFINE + 升级；无关联文件的模糊条目（如"响应时间不劣化"）由 supervisor 审查上报时人工比对，标注"无机械信号"；
@@ -129,7 +131,7 @@ archaeology（考古与基线）→ safety-net（回归安全网）→ spec（�
 
 ## 6. 验收标准（DoD）
 
-1. 拼接生成的 supervisor.md 与拆分前版本语义等价：diff 审查通过（允许项：模式声明节新增、章节顺序），零条款丢失/弱化；
+1. 拼接生成的 supervisor.md 与拆分前版本语义等价：diff 审查通过（允许项：模式声明节新增、章节顺序、【CR P0-1】参数化改写），零条款丢失/弱化；
 2. rework.md 含 F2/F3/F4 全部条款：命令式、可执行、有失败分支、无"适当/尽量"类模糊词；
 3. install.sh 装出两个命令均可用：本地实测 `/rework` 与 `/supervisor` 注入成功（含拼接产物 grep 断言：关键节齐全、单一 frontmatter、无重复标题）；
 4. 两套回归测试（test_stopfailure.sh / test_watchdog.sh）零改动全绿；install 备份/幂等行为不回归；
