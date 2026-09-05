@@ -139,7 +139,13 @@
 
 ### dev-0 实测记录
 
-（待 dev-0 执行时回填）
+**实测时间**：2026-09-05（拼接样本构造 + `claude -p` 会话验证）
+
+**结论①：拼接产物可被正常加载为 slash command —— 通过**。样本（`{frontmatter + 模式声明节} + {supervisor.md 去 frontmatter 前 2000 字符}`）放入 `~/.claude/commands/test-splice.md` 后，新会话的命令列表中可见该命令。本地核验结构：首行 frontmatter 完整、模式层标题与 core 拼接段标题均在、整行 `---` 共 3 根（frontmatter 两根 + 分隔标题一根）——正文含水平线不破坏 frontmatter 解析（与 P2-10 断言修正一致）。
+
+**结论②：下划线前缀文件也会被注册为命令 —— 与预期相反，实测推翻**。`_test-splice.md` 同样出现在会话命令列表中（Claude Code 2.1.259 对 commands 目录不做下划线过滤）。**影响与裁决**：spec F5 "原料不放 commands 目录"的决策从"风格约定"升级为**必须**——`_core-supervisor.md` 若放 `~/.claude/commands/` 会被注册为可执行的 `/核心协议片段` 命令，用户误触会注入一个没有 frontmatter、语义不完整的协议片段。维持原设计：原料安装到 `~/.claude/hooks/claude-supervisor/` 目录。
+
+**备注**：样本 description 在会话列表中未显示（命令列表仅列名），不影响加载功能；样本文件已清理。
 
 ### DoD
 
