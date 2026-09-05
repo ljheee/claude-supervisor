@@ -24,15 +24,15 @@
 
 ### 步骤
 
-1. 手动构造最小拼接样本：`{frontmatter + 模式声明两行} + {现 supervisor.md 去掉 frontmatter 的前 20 行}`，放到 `~/.claude/commands/_test-splice.md`。
-2. 启动一个临时 Claude Code 会话（用完即退出），输入 `/ _test-splice`（或列表确认命令出现），验证：命令被注册、frontmatter 的 description 正常显示、正文完整注入。
-3. 验证 `_` 前缀文件是否也被注册为命令（若被注册，确认 F5 的"原料不放 commands 目录"决策正确；若不被注册，该决策降级为风格约定，记录结论）。
-4. 实测完删除样本文件，结论（通过/不通过 + 发现）追加写入本 plan 的"dev-0 实测记录"小节。
+1. 【CR P1-7：两步解耦】先用普通命令名验证拼接可加载：手动构造样本 `{frontmatter + 模式声明两行} + {现 supervisor.md 去掉 frontmatter 的前 20 行}`，放到 `~/.claude/commands/test-splice.md`。
+2. 启动一个临时 Claude Code 会话（用完即退出），输入 `/test-splice`（或列表确认命令出现），验证：命令被注册、frontmatter 的 description 正常显示、正文完整注入。
+3. 【CR P1-7：独立验证下划线前缀】另建一个仅文件名不同的 `_test-splice.md` 副本，确认下划线前缀文件是否被注册为命令（若被注册，确认 F5 的"原料不放 commands 目录"决策正确且必须；若不被注册，该决策降级为风格约定）——此步与拼接加载验证互不干扰，任一失败不影响另一个结论。
+4. 实测完删除两个样本文件，结论（通过/不通过 + 发现）追加写入本 plan 的"dev-0 实测记录"小节。
 
 ### DoD
 
-- [ ] 拼接样本被 Claude Code 正常加载为命令，注入内容完整
-- [ ] 下划线前缀注册行为有实测结论并记录
+- [ ] 拼接样本（普通名）被 Claude Code 正常加载为命令，注入内容完整
+- [ ] 下划线前缀注册行为有独立实测结论并记录
 - [ ] 样本文件已清理
 
 ---
@@ -43,10 +43,10 @@
 
 ### 步骤
 
-1. 新建 `commands/_core-supervisor.md`：按 spec F1 抽取清单从现 supervisor.md 搬运模式无关章节。头部加片段声明："本文件是核心协议片段，由 install.sh 拼接进模式命令，不是独立 slash command，不要直接执行。"搬运纪律：**逐字搬运，不改措辞**（含"见启动步骤第 6 步"等交叉引用——引用目标在 core 内部，拼接后仍然成立）。
-2. 改写 `commands/supervisor.md` 为绿地模式层：保留 frontmatter；新增"模式声明"节（一句话：本命令为绿地开发模式，前置阶段为 clarify→spec→plan，核心协议见下方拼接部分——拼接后此话术自然成立）；保留 clarify/spec/plan 三节质询清单（这三节从原文搬出但**留在模式层**）；其余引用 core 的章节删除（拼接时由 core 补齐）。
+1. 新建 `commands/_core-supervisor.md`：按 spec F1 抽取清单从现 supervisor.md 搬运模式无关章节。头部加片段声明："本文件是核心协议片段，由 install.sh 拼接进模式命令，不是独立 slash command，不要直接执行。"搬运纪律：**逐字搬运，不改措辞**（含"见启动步骤第 6 步"等交叉引用——引用目标在 core 内部，拼接后仍然成立）；【CR P0-1】例外仅三处绿地特化措辞的参数化改写（首阶段名/phase 枚举/schema 示例，见 spec F1，改写后语义等价）；【CR P1-5】total_phases 锁定句从绿地 plan 节提炼为 core 通用条款。
+2. 改写 `commands/supervisor.md` 为绿地模式层：保留 frontmatter；新增"模式声明"节（一句话：本命令为绿地开发模式，前置阶段为 clarify→spec→plan，核心协议见下方拼接部分——拼接后此话术自然成立）；【CR P1-3】模式声明节同时声明本模式的 phase 枚举与首阶段（初始指令下发时以此覆盖 worker.md 的绿地默认枚举）；保留 clarify/spec/plan 三节质询清单（这三节从原文搬出但**留在模式层**，且 plan 节删除已提炼入 core 的 total_phases 锁定句）；【CR P0-2】模式层不得使用与 core 同名的二级标题；其余引用 core 的章节删除（拼接时由 core 补齐）。
 3. 临时拼接验证（正式拼接逻辑 dev-3 才写，此处手工 cat）：`cat supervisor.md _core-supervisor.md > /tmp/splice-check.md`。
-4. **diff 审查（本 Phase 核心门禁）**：`diff` 拼接产物与 git HEAD 的 supervisor.md，允许差异仅限：新增模式声明节、章节顺序重排、frontmatter 后的分隔标题。逐条核对语义条款零丢失零弱化。
+4. **diff 审查（本 Phase 核心门禁）**：`diff` 拼接产物与 git HEAD 的 supervisor.md，允许差异仅限：新增模式声明节、章节顺序重排、frontmatter 后的分隔标题、【CR P0-1】三处参数化改写。逐条核对语义条款零丢失零弱化。
 5. 记录拆分后行数：绿地模式层 + core 行数（供 dev-5 汇总注入体积预算）。
 
 ### DoD
@@ -69,18 +69,20 @@
 3. **archaeology 节**：阶段定义 + 产出四件（架构地图/债务清单/疑点清单/依赖暗网）+ spec F2 的四条质询（每条≤一行命令句）+ 疑点裁决默认"需用户"级条款。
 4. **safety-net 节**：阶段定义（锁定当前行为，含待改行为）+ 三条质询（锁行为不锁实现/覆盖面口径/可追溯性）+ 无框架时允许脚本级断言。
 5. **spec/plan 特化节**：变更差集声明格式（旧行为 X → 新行为 Y，禁"优化XX"）、phase DoD 二选一断言（安全网一致 / 预期 diff 清单）、单 phase = 一次可回滚单元、pre-mortem 换问法（隐性契约版）。
-6. **dev-N 特化节**：supervisor APPROVE 前必须亲自跑安全网对比（机械回放纪律的 rework 形态）。
-7. **frozen_behaviors 节**：schema 定义、锁定流程（初稿→用户确认→锁定）、触碰即 REFINE+升级、变更通道（先改账再动手）、总结披露。
-8. **rework 红线节**：diff 文件集 ⊆ phase 声明范围（越界即 REFINE）；免责通道（范围变更走"需用户"级 QUESTIONS）。
+6. **dev-N 特化节**：supervisor APPROVE 前必须亲自跑安全网对比（机械回放纪律的 rework 形态）；【CR P1-9】范围比对命令式条款（git diff --name-only vs phase 声明范围，超出即 REFINE）；【CR P1-8】dev-1 进入前工作区 clean 前置断言。
+7. **frozen_behaviors 节**：schema 定义、锁定时点（safety-net APPROVE 时用户确认锁定）、锁定前初稿状态语义（触碰不判违规但 spec 审查核验覆盖）、告知机制（锁定后首个 dev 指令下发全文）、触碰机械信号（evidence 关联文件与 diff 求交）、变更通道（先改账再动手）、总结披露。
+8. **rework 专属纪律节**【CR P0-2：标题不与 core "行为红线"同名】：diff 文件集 ⊆ phase 声明范围（越界即 REFINE）；免责通道（范围变更走"需用户"级 QUESTIONS）。
 9. 质询计数纪律沿用 core 的 Loop Guard 与 v1 两轮上限声明（在模式层声明一次：与绿地同规）。
+10. 【CR P2-14】模式声明节含长阶段时限：archaeology/safety-net 默认失联时限 120 分钟（下发指令时约定）。
 
 ### DoD
 
 - [ ] 质询条款全部命令式，无"适当/尽量"类模糊词（grep 自查）
-- [ ] frozen_behaviors schema 与 spec F3 逐字段一致
-- [ ] rework 模式层 ≤60 行（wc -l，不含拼接的 core 部分）
-- [ ] 与 worker.md 的 WORKER QUESTIONS 三级定义文案逐字一致（rework 不新造分级措辞）
+- [ ] frozen_behaviors schema 与 spec F3 逐字段一致，含锁定时点与告知机制条款
+- [ ] rework 模式层 ≤80 行（wc -l，不含拼接的 core 部分）【CR P1-6 放宽自 60】
+- [ ] 分级定义引用 core 原文不新造措辞；模式声明含 phase 枚举覆盖与 120 分钟时限声明【CR P1-3/P2-14】
 - [ ] --baseline 失败分支存在（不可解析 → 问用户）
+- [ ] 模式层无与 core 同名二级标题（grep 校验）
 
 ---
 
@@ -90,7 +92,7 @@
 
 ### 步骤
 
-1. install.sh 新增拼接逻辑：对 supervisor/rework 两命令，`cat 模式层 _core-supervisor.md`（core 前加分隔标题）→ 写 `~/.claude/commands/<name>.md`；拼接后 grep 断言：恰好一个 frontmatter（文件首行 `---` 计数≥2 即中止）、关键节标题齐全（"你的身份与核心原则"/"中断与失联处理"/"行为红线"）、无重复的 `## ` 标题——断言失败则备份中止安装，不产出半成品。
+1. install.sh 新增拼接逻辑：对 supervisor/rework 两命令，`cat 模式层 _core-supervisor.md`（core 前加分隔标题）→ 写 `~/.claude/commands/<name>.md`；拼接后 grep 断言【CR P2-10 修正 frontmatter 断言】：文件首行为 `---` 且第二个 `---` 之后正文无以 `---` 为整行的水平线（不误杀正文合法分隔线）、关键节标题齐全（"你的身份与核心原则"/"中断与失联处理"/"行为红线"）、无重复的 `## ` 标题——断言失败则备份中止安装，不产出半成品。
 2. `_core-supervisor.md` 安装为原料副本：`~/.claude/hooks/claude-supervisor/_core-supervisor.md`（与 hook 同目录，不在 commands 目录）。
 3. 备份/幂等/损坏中止路径复用现有函数，不为拼接新写一套。
 4. 卸载路径检查（README 卸载节在 dev-4 同步，此处只保证 install 幂等重跑行为不变）。
@@ -133,6 +135,10 @@
 2. 本地真实安装（bash install.sh），然后注入实测：新开 Claude Code 会话分别执行 `/supervisor` 与 `/rework`（可用极小目标，验证协议注入与启动步骤执行到"等待注册"即可退出，不做完整项目）。
 3. DoD 逐条勾验（spec §6 五项）。
 4. 汇总挂账清单（无法主动安排的实测项），提交最终 commit。
+
+### dev-0 实测记录
+
+（待 dev-0 执行时回填）
 
 ### DoD
 
