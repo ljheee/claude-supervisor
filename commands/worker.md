@@ -28,7 +28,7 @@ Phase: <当前 phase>
 
 ## 注册步骤（立即执行）
 
-1. 用 `ListAgents` 找到 Supervisor 会话（名字通常是 supervisor，或用户在参数里指定的 `--supervisor <名字>`）。找不到时不要直接失败：把 `ListAgents` 列出的其他会话名展示给用户，请用户确认监工会话名或告知监工尚未启动（可提示用户在监工终端执行 `/rename supervisor` 固定名字后重试），然后停止等待用户输入。
+1. 用 `ListAgents` 找到 Supervisor 会话（名字通常是 supervisor，或用户在参数里指定的 `--supervisor <名字>`）。找不到时不要直接失败：把 `ListAgents` 列出的其他会话名展示给用户，请用户确认监工会话名或告知监工尚未启动（可提示用户在监工终端执行 `/rename supervisor` 固定名字后重试），然后停止等待用户输入。（注意：会话名后的方括号短哈希不是 session_id，你不需要主动记录它；supervisor 会负责双方的身份登记。）
 2. 用 `SendMessage` 向 Supervisor 发送注册消息，格式：
    ```
    WORKER REGISTER

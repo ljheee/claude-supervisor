@@ -17,7 +17,7 @@ argument-hint: <项目目标> [--project-dir /path/to/repo]
 ## 启动步骤（Observe 前的初始化）
 
 1. 解析参数：第一个非选项参数是**项目目标**；若有 `--project-dir`，那是被监工的仓库路径（默认当前目录）。启动时若 `<project-dir>/.supervisor/` 不在 .gitignore 中，提醒用户把 `.supervisor/` 加入 .gitignore（监工账本不应进 git，避免 worker commit 裹挟且多 worker 间无谓冲突）。
-2. 用 `ListAgents` 找到**你自己**的会话条目，确认你的会话名与 session_id。若你的名字不是 supervisor，建议用户 `/rename supervisor`（重开会话名字会变，session_id 也不变但需重写 state.json）。
+2. 用 `ListAgents` 找到**你自己**的会话条目，确认你的会话名与 session_id。⚠️ **session_id 格式坑（实测发现）**：ListAgents 输出里的 `This session is supervisor [6aebfc]` 方括号内是短哈希标签，**不是** session_id；合法 session_id 是 36 位 UUID 形如 `d427b304-d742-42d2-bacc-470ec7d1475f`。写入 state.json 前必须自检：若不是 UUID 格式，改用其他可达会话条目的完整 sessionId 字段推导，或让用户从注册表确认——写入错误的短标签会直接导致 hook 寻址失败（hook 靠 supervisor_session_id 前缀匹配 `~/.claude/sessions/` 注册表）。若你的名字不是 supervisor，建议用户 `/rename supervisor`（重开会话名字会变，session_id 也不变但需重写 state.json）。
 3. 读取/创建全局状态文件 `<project-dir>/.supervisor/state.json`（见下方 schema）。若已存在，先向用户汇报当前进度再继续。
 4. **state.json 必须立即写入 `supervisor_name` 与 `supervisor_session_id`**（第 2 步获取）——StopFailure hook 和 watchdog 靠它们寻址你。
 5. **不要主动向疑似 worker 发消息**（避免误伤无关会话）：优先等待 `WORKER REGISTER` 主动注册；若 1 分钟内无注册到达，向用户报告当前可达会话列表并请用户确认哪些是本项目 worker。
@@ -29,7 +29,7 @@ argument-hint: <项目目标> [--project-dir /path/to/repo]
    3) 无任何事项需要处理时，只输出一行"巡检正常，无待办"，不发任何消息、不做任何其他输出（noop 纪律）。
    ```
    cron 触发会等当前回合结束才注入，不会打断你正在进行的审查。全部 worker 的 phase 均为 done 时用 CronDelete 清掉本任务（见状态机 dev-N）。
-7. 收到 WORKER REGISTER 后，用 `ListAgents` 解析发送方会话，取得其 **session_id**，连同名字写入 workers[]（见下方身份主键规则），然后发送**初始指令**，消息必须包含：
+7. 收到 WORKER REGISTER 后，用 `ListAgents` 解析发送方会话，取得其 **session_id**（⚠️ 必须是完整 UUID，不是名字后的短哈希标签，见启动步骤 2 的格式坑说明），连同名字写入 workers[]（见下方身份主键规则），然后发送**初始指令**，消息必须包含：
    - 项目目标（goal 原文）与该 worker 的 scope（单 worker 为 all）
    - 上报协议格式（WORKER REPORT 模板，见下方内联模板）
    - WORKER STATUS 响应模板（见下方）
