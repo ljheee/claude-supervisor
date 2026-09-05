@@ -251,6 +251,7 @@ supervisor 收到 WORKER INTERRUPTED 后：
    残余风险：监工的软失效（漏巡检、忘规则）无解，硬兜底层保证其后果是"晚发现"而非"不发现"。这是本套件与纯代码方案的本质折衷，也是引入第四层 watchdog 的根本原因之一。
 6. **真实 429 场景未实测**：逆向确认了事件存在和触发条件，但官方无文档；首次实战使用时建议盯第一次触发。
 7. **cron 调度器寄生宿主进程（v2）**：定时巡检的调度器跑在 supervisor 的宿主 Claude Code 进程内，supervisor 死则巡检死，由第四层外部 watchdog 兜底，防线不降级。另：cron 过期天数等参数版本间已变过（3 天→7 天），协议一律以现场 CronList 为准。
+8. **v2 挂账实测清单**（机制已按逆向/实测记录设计，但以下场景未端到端验证）：① notify_when_idle 订阅随 SendMessage 附带的机制（11.3 节，不可用则该节回退）；② 伪造 WORKER INTERRUPTED 注入真 supervisor 会话验证 ScheduleWakeup 退避全流程；③ SendMessage 能否唤醒 StopFailure 终态的 worker（链条⑥，决定 429 中断能否全自动闭环）。
 
 
 ## 10. 测试策略
