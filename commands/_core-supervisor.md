@@ -12,7 +12,7 @@
 3. 读取/创建全局状态文件 `<project-dir>/.supervisor/state.json`（见下方 schema）。若已存在，先向用户汇报当前进度再继续。
 4. **state.json 必须立即写入 `supervisor_name` 与 `supervisor_session_id`**（第 2 步获取）——StopFailure hook 和 watchdog 靠它们寻址你。
 5. **不要主动向疑似 worker 发消息**（避免误伤无关会话）：优先等待 `WORKER REGISTER` 主动注册；若 1 分钟内无注册到达，向用户报告当前可达会话列表并请用户确认哪些是本项目 worker。
-6. **创建定时自巡检 cron（把第三层防御从"被动唤醒"升级为"定时醒来"）**：先 `CronList` 查重——已存在 prompt 含 "监工定时巡检" 标识的任务则跳过创建（幂等，防 /supervisor 协议重注入产生双 cron）；不存在时用 `CronCreate` 创建（cron='*/10 * * * *'，recurring=true，**不传 durable**——默认 session-only，durable 会被同目录其他会话接管执行，巡检必须只属于你自己），prompt 为：
+6. **创建定时自巡检 cron（把第三层防御从"被动唤醒"升级为"定时醒来"）**：先 `CronList` 查重——已存在 prompt 含 "监工定时巡检" 标识的任务则跳过创建（幂等，防协议重注入产生双 cron）；不存在时用 `CronCreate` 创建（cron='*/10 * * * *'，recurring=true，**不传 durable**——默认 session-only，durable 会被同目录其他会话接管执行，巡检必须只属于你自己），prompt 为：
    ```
    监工定时巡检（持久例行动作，无 CronDelete 收尾指令则每轮照常执行，勿停）：
    1) CronList 自查：本巡检任务若已消失（自动过期）则立即按启动步骤第 6 步重建，这是例行动作不是异常；

@@ -54,7 +54,7 @@ install_backup() {
 #     3. no duplicated '## ' headings (mode layer must not collide with core)
 splice_command() {
   local mode_layer="$1" dst="$2" tmp="${2}.splice-tmp-$$"
-  cat "$mode_layer" "$CORE" > "$tmp"
+  cat "$mode_layer" "$CORE" > "$tmp" || { rm -f "$tmp"; echo "  ERROR: cannot read splice inputs for $dst" >&2; exit 1; }
   if ! python3 - "$tmp" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -63,12 +63,12 @@ errors = []
 if not lines or lines[0] != '---':
     errors.append('first line is not frontmatter "---"')
 else:
-    try:
-        end = lines[1:].index('---') + 1
-        if any(l == '---' for l in lines[end+1:]):
-            pass  # horizontal rules after frontmatter are legal (P2-10)
-    except ValueError:
-        errors.append('frontmatter is not closed by a second "---" line')
+    # frontmatter must close within the first 10 lines; a '---' later in the
+    # body is a horizontal rule, NOT a frontmatter closer (P2-2: an unclosed
+    # frontmatter whose body contains '---' must not pass)
+    close = [i for i, l in enumerate(lines[1:10], 1) if l == '---']
+    if not close:
+        errors.append('frontmatter is not closed by a second "---" line within the first 10 lines')
 required = ['## 你的身份与核心原则', '## 启动步骤', '## 中断与失联处理', '## 行为红线',
             '## 阶段状态机']
 body = '\n'.join(lines)
@@ -232,7 +232,7 @@ echo "  终端B（同一项目目录）:           /worker"
 echo ""
 echo "  （可开更多终端重复 /worker，多 worker 并行受监工）"
 echo ""
-echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查→逐Phase开发(先自CR再受审)→总结报告"
+echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查→逐Phase开发(先自CR再受审)→总结报告（绿地）；rework 模式为 考古→安全网→改造规格→计划→逐Phase开发"
 echo "依赖: Claude Code >= 2.1.224（ListAgents + SendMessage；StopFailure hook 需 >= 2.1.259，"
 echo "      官方无检测接口，请自行 claude --version 确认）"
 echo ""

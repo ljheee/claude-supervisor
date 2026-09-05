@@ -315,6 +315,8 @@ rework 状态机：`archaeology → safety-net → spec → plan → dev-N`。�
 
 ### 12.4 frozen_behaviors（不改清单）
 
+（实现决策记录【实施 CR P2-7】：spec F1 曾要求 core schema 含 frozen_behaviors 可选字段，但这与零回归硬约束矛盾——core schema 必须与拆分前逐字一致，不能加字段。最终实现：schema 定义放 rework 模式层（模式特化字段归模式层），core 不动。这与"模式无关者进 core"的抽取原则自洽。）
+
 state.json 可选顶层字段，生命周期：archaeology 产出初稿 → safety-net APPROVE 时用户确认锁定（locked_by）→ 锁定后首个 dev 指令把清单全文下发给 worker（worker 不读 state.json，必须显式告知）→ dev 期触碰且无授权即 REFINE + 升级。触碰的机械信号：条目 evidence 字段（考古证据 + 关联文件/函数清单）与 dev diff 求交，交非空即触发；模糊条目（如"响应时间不劣化"）无机械信号，由 supervisor 审查时人工比对并标注。变更通道："需用户"级申请，获准后先改账再动手。
 
 ### 12.5 顺手重构红线（范围比对）
@@ -323,4 +325,4 @@ state.json 可选顶层字段，生命周期：archaeology 产出初稿 → safe
 
 ### 12.6 注入体积预算
 
-协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 40 行、rework 模式层 66 行、core 170 行（拆分时实测）。拼接产物：绿地 209 行（原 198，增量 11 行全在模式声明节）、rework 236 行。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积。
+协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行（实施 CR 后实测）、core 169 行（拆分时实测）。拼接产物：绿地 208 行（原 197，增量全在模式声明节）、rework 237 行（实施 CR P1-1 内联化后）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。
