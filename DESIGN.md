@@ -74,11 +74,11 @@ InstructionsLoaded, CwdChanged, FileChanged, DirectoryAdded, MessageDisplay
 - **`StopFailure`**（2.1.259 存在）：turn 以失败结束（429 耗尽重试、网络错误、API 错误）时触发。stdin schema：`{hook_event_name, session_id, transcript_path, cwd, prompt_id, error, error_details, last_assistant_message}`。配套执行器 `executeStopFailureHooks`。**这是中断防御第一层的根基。**
 - `PostToolUseFailure`：单个工具调用失败后触发（粒度太细，且 429 发生在模型回合层而非工具层，不适用本场景）。
 - `Stop`：turn 正常结束。不能用于中断检测——它恰恰在失败时不触发。
-- `notify_when_idle`（control 帧 `peer_idle_notice`）：turn 结束的信号性通知。**不能作为中断检测**：错误结束的 turn 是否发 notice 未经验证；即便发，也只表达"停了"不携带原因；进程死亡时主体消失什么都发不出。
+- `notify_when_idle`（control 帧 `peer_idle_notice`）：turn 结束的信号性通知。**不能作为中断检测**：错误结束的 turn 是否发 notice 未经验证；即便发，也只表达"停了"不携带原因；进程死亡时主体消失什么都发不出。**v2 起的新用法**：作为 worker 活性信号刷新 `last_response_ts`（idle ≠ 完成，不作督促触发器）——但订阅机制本身未实测，属假设性增益，不可用则整体回退。
 
 ### 2.4 明确不用的机制及原因
 
-- **notify_when_idle**：信号太弱、覆盖不全（见 2.3），且 worker 协议已强制每个里程碑主动上报，订阅完成信号属于冗余。
+- **notify_when_idle（v1 结论，v2 部分反转）**：不用作中断检测或完成信号（信号太弱、覆盖不全，见 2.3），且 worker 协议已强制每个里程碑主动上报，订阅完成信号属于冗余。v2 起仅用作活性信号（刷新 last_response_ts，见第 11 节），仍不作督促触发器——按 idle 督促会按回合频率轰炸正在干活的 worker（长 Phase 中间每回合都 idle）。
 - **Agent Teams**：官方的 lead/teammate 组织（roster.json、plan 审批、worktree 隔离）。它是"组织内的层级协作"，本套件要的是"平级会话之上的独立监工"——supervisor 不属于团队、不写代码、只审查推进，与 Teams 的 lead（亲自干活的人）角色冲突。用跨会话 messaging + 自定义协议更贴合。
 
 ## 3. 架构
@@ -102,7 +102,7 @@ InstructionsLoaded, CwdChanged, FileChanged, DirectoryAdded, MessageDisplay
 
 三要素对应监工模式：
 
-- **被动守卫（Passive Guardrail）**：supervisor 从不主动打断 worker 干活；只在收到上报（或中断通知）后才对已产出的结果做后置审查（Post-audit）。触发器是消息，不是轮询。
+- **被动守卫（Passive Guardrail）**：supervisor 从不主动打断 worker 干活；只在收到上报（或中断通知）后才对已产出的结果做后置审查（Post-audit）。触发器是消息，不是轮询（v2 唯一例外：定时自巡检 cron，见第 11 节，tick 无事时零消息零长输出）。
 - **OODA 循环**：Observe（读上报 + 亲自读文件/git diff 验证，不只信摘要）→ Orient（对照 goal 与账本）→ Decide（APPROVE / REFINE / ESCALATE）→ Act（SendMessage 下发结构化决策）。随下一次上报再次进入循环。
 - **全局状态存储**：`state.json` 记录 goal、per-worker phase、每次审查结论、事故流水。Loop Guard（同 phase 连续 3 次 REFINE → 升级用户）防"错改-回改"死循环。
 
@@ -144,17 +144,17 @@ B 类与 C 类的本质区别：hook、模型自报、任何消息机制都寄�
 ```
 B类中断 ──→ ① StopFailure hook（秒级，自动）
 A类中断 ──→ ② 协议层 STALLED/RESUME（worker 自报，秒级）
-静默失联 ──→ ③ supervisor 巡检（被唤醒时顺带，分钟~小时级）
+静默失联 ──→ ③ supervisor 巡检（v2 起为 10 分钟定时 cron + 被唤醒时顺带，分钟级）
               ④ 外部 watchdog（cron，分钟级，覆盖 supervisor 自身不在线的盲区）
 ```
 
-四层互为冗余而非互斥：hook 投递失败（supervisor 进程也死了）时 `delivered: false` 落盘，③ 的补课逻辑会在 supervisor 下次醒来时追认；③ 依赖 supervisor 被唤醒，④ 用 cron 补上"supervisor 长时间无人唤醒"的盲区。
+四层互为冗余而非互斥：hook 投递失败（supervisor 进程也死了）时 `delivered: false` 落盘，③ 的补课逻辑会在 supervisor 下次醒来时追认；③ 依赖 supervisor 被唤醒（v2 起定时 cron 把它从"碰运气"升级为"最多 10 分钟必醒"），④ 用 cron 补上"supervisor 进程死亡时无人唤醒"的盲区（cron 调度器寄生在 supervisor 宿主进程里，宿主死则巡检死，第四层不降级）。
 
 ### 4.4 失联判定的活性语义
 
 **失联时钟只由 worker 主动发出的消息重置**（WORKER REPORT / STATUS / RESUME / REGISTER → `last_response_ts`）。supervisor 自己下发的指令（`last_instruction_ts`）只作展示，绝不参与判定。否则会出现"告警 → 发 STATUS CHECK → 时钟重置 → 再等一个周期"的无限循环，失联的 worker 永远升不了级（P1-10 修复）。
 
-supervisor 无法定时醒来，所以 STATUS CHECK 的"10 分钟无回应重试、再无回应升级"由 `pending_check = {ts, retries}` 状态承载：每次 supervisor 被唤醒时结算（超时则重试或升级），配合 watchdog 的 cron 摧发保证 supervisor 一定会被叫醒（P1-9 修复）。
+supervisor v1 无法定时醒来，v2 起有 10 分钟巡检 cron（见第 11 节），但 STATUS CHECK 的"10 分钟无回应重试、再无回应升级"仍由 `pending_check = {ts, retries}` 状态承载：每次 supervisor 被唤醒（含 cron tick）时结算（超时则重试或升级），配合 watchdog 的 cron 摧发保证 supervisor 一定会被叫醒（P1-9 修复）。
 
 ## 5. StopFailure hook 设计细节
 
@@ -203,7 +203,7 @@ hook 挂在用户全局 settings.json 上，失败模式必须极度保守：
 
 supervisor 收到 WORKER INTERRUPTED 后：
 
-- kind 为 rate-limit/network：`sleep 300`（5 分钟）后 SendMessage 唤醒。**实现坑**：supervisor 用 Bash 工具执行 sleep 时必须显式传 timeout ≥ 360000ms——Bash 工具默认 2 分钟超时，会在 sleep 结束前先打断它。
+- kind 为 rate-limit/network：`ScheduleWakeup(delaySeconds=300)` 延迟唤醒后 SendMessage 唤醒（v2 起；v1 用 Bash `sleep 300`，存在 Bash 工具默认 2 分钟超时提前打断退避的坑，已废弃）。**流程纪律：落账在前、arm 在后**——ScheduleWakeup arm 后本回合即结束，incidents/acknowledged/pending_check 必须在 arm 之前落账，唤醒指令整体内嵌于自包含 prompt。
 - 多 worker 同时中断：错峰，每个额外 +60s（sleep 360/420/...），避免同时唤醒再次集体撞限流。
 - kind 为 api-error：退避缩至 60s；重试后仍中断直接升级用户（大概率是配置/额度问题，重试无益）。
 - 唤醒后置 `pending_check`，重试/升级由后续唤醒结算（见 4.4）。
@@ -250,6 +250,8 @@ supervisor 收到 WORKER INTERRUPTED 后：
    - **协议写法本身**：立即执行式指令、行为红线明确列举、每步给具体动作而非抽象原则——经验上强命令式 + 具体步骤的遵循率显著高于软描述。
    残余风险：监工的软失效（漏巡检、忘规则）无解，硬兜底层保证其后果是"晚发现"而非"不发现"。这是本套件与纯代码方案的本质折衷，也是引入第四层 watchdog 的根本原因之一。
 6. **真实 429 场景未实测**：逆向确认了事件存在和触发条件，但官方无文档；首次实战使用时建议盯第一次触发。
+7. **cron 调度器寄生宿主进程（v2）**：定时巡检的调度器跑在 supervisor 的宿主 Claude Code 进程内，supervisor 死则巡检死，由第四层外部 watchdog 兜底，防线不降级。另：cron 过期天数等参数版本间已变过（3 天→7 天），协议一律以现场 CronList 为准。
+
 
 ## 10. 测试策略
 
@@ -261,3 +263,33 @@ supervisor 收到 WORKER INTERRUPTED 后：
 测试数据的一个教训值得记录：给本地 naive 时间戳硬加 `Z` 后缀会把它变成"未来时间"（UTC 解析比本地墙钟早 8 小时），导致静默值为负、永不告警——测试用例 K 用真正的 UTC 过去时间戳单独覆盖 Z 解析路径。
 
 真实 429 场景的端到端（Claude Code 触发 StopFailure → hook 投递 → supervisor 退避唤醒）尚未实测，首次实战使用时建议盯第一次触发。
+
+## 11. 定时自巡检与对齐漏斗（v2 新增）
+
+实测依据见 `specs/2026-09-05-scheduled-supervision/claude_cron.md`（Claude Code 2.1.259 定时任务机制实测记录）。
+
+### 11.1 定时自巡检
+
+supervisor 启动时用 `CronCreate` 创建每 10 分钟的 session-only 巡检 cron，prompt 含巡检三步 + CronList 自查重建（crons 自动过期，重建是例行动作）+ noop 纪律（无事时只输出一行，防上下文膨胀加速协议淡化）。
+
+关键设计决定：**session-only（durable=false）而非 durable**——实测 durable 任务是目录级共享的，执行者死后同目录其他会话（worker）会抢锁接管执行，巡检 prompt 将 fire 进 worker 上下文造成污染；session-only 保证执行者永远只有 supervisor 自己。代价：supervisor 死则 cron 死（可接受，第四层兜底）。
+
+幂等：/supervisor 协议重注入是既定的漂移恢复手段，启动步骤先 CronList 查重防双 cron。收尾：全部 done 时 CronDelete。
+
+信号频率谱（自下而上）：分钟级 watchdog 告警（硬）→ 10 分钟巡检 tick（硬，宿主调度器）→ 回合级 idle 通知（硬，宿主）→ 里程碑 WORKER REPORT（软）。
+
+### 11.2 ScheduleWakeup 退避与流程重排
+
+中断退避从 Bash `sleep 300` 改为 `ScheduleWakeup(delaySeconds=300, ...)`：消除 Bash 默认 2 分钟超时坑与工具占用。delaySeconds 运行时夹在 [60,3600]，api-error 类退避 60s 恰为下限。**流程重排是本改动的核心**：arm 后本回合即结束，所以落账（incidents/acknowledged/pending_check）必须前置于 arm，唤醒动作整体移入自包含 prompt（不依赖原回合记忆）。
+
+### 11.3 idle 活性信号
+
+supervisor 每次 SendMessage 附带 notify_when_idle 订阅，收到 idle 通知唯一动作是刷新 `last_response_ts`（宿主级硬证据：进程活着、回合正常结束）。**明确不用作督促触发器**：worker 协议本就是不干完里程碑不上报，长 Phase 中间每回合都 idle，按 idle 督促会按回合频率轰炸正在干活的 worker（CR P0-1 裁定）。是否督促只走既有 60 分钟失联判定，一套逻辑不双轨。⚠️ 订阅机制未实测，不可用则本节回退。
+
+### 11.4 三层回答防火墙
+
+worker 提问按 goal内/监工职权/需用户三级标注（WORKER QUESTIONS 格式）。supervisor 只答前两级（监工职权裁决记入 state.json 的 decisions，总结报告披露）；需用户级攒批问真用户。防火墙目的：把"监工代理"与"冒名顶替用户"隔开——若 supervisor 无边界地代答目标级问题，会形成"两个 LLM 互相说服"的漂移放大器，目标偏移无人校验。
+
+### 11.5 三阶段质询（对齐漏斗）
+
+v1 的对齐是被动的（worker 报什么审什么），真问题的挖掘责任全压在执行者视角的 worker 身上。v2 升级为主动质询：clarify 挖理解偏差（对抗式挖掘沉默假设、反向验收标准）、spec 挖完整性缺口（边界/错误路径/非功能）、plan 挖执行风险（DoD 可验证性、隐藏耦合、pre-mortem）。每阶段质询上限两轮，与 Loop Guard（3 次 REFINE）独立计数，防"完美澄清"变不开工借口。

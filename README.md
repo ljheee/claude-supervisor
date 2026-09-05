@@ -12,7 +12,7 @@ bash install.sh
 
 安装内容：`/supervisor`、`/worker` 两个 slash 命令（→ `~/.claude/commands/`）；StopFailure hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json`，幂等）；watchdog 脚本（→ `~/.agent-mail/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置。
 
-版本要求：Claude Code >= 2.1.224（ListAgents + SendMessage）；StopFailure hook 需 >= 2.1.259。`claude --version` 确认。
+版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。
 
 ## 快速开始（多终端）
 
@@ -45,7 +45,7 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 
 | 中断类型 | 表现 |
 |---|---|
-| 429 / 网络错误 / API 错误掐断回合 | StopFailure hook 秒级自动上报，supervisor 退避约 5 分钟（多 worker 错峰）后发消息唤醒 worker 从中断点继续；两次唤醒无回应则升级你 |
+| 429 / 网络错误 / API 错误掐断回合 | StopFailure hook 秒级自动上报，supervisor 用 `ScheduleWakeup` 原生延迟唤醒退避约 5 分钟（多 worker 错峰）后发消息唤醒 worker 从中断点继续；两次唤醒无回应则升级你 |
 | worker 自己遇到环境卡点（工具失败、依赖坏） | worker 主动发 WORKER STALLED，supervisor 给替代方案或升级你 |
 | 进程被杀 / 终端关闭 | hook 无法执行（执行主体已消失）——watchdog/巡检发现超时静默后升级你，附 session_id 和 `claude --resume` 恢复指引；恢复后 worker 发 WORKER RESUME 报到 |
 
@@ -53,9 +53,15 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 
 前提：项目 `.gitignore` 加 `.supervisor/`（supervisor 启动时也会提醒）。
 
+## 定时自巡检（v2）
+
+supervisor 启动时用 `CronCreate` 创建每 10 分钟的 session-only 巡检任务（不传 durable——durable 任务是目录级共享的，执行者死后会被同目录其他会话接管执行，巡检必须只属于 supervisor 自己）。每次 tick：CronList 自查（任务因自动过期消失则立即重建）→ 执行巡检三步（失联判定 / pending_check 结算 / 中断补课）→ 无事时只输出一行"巡检正常，无待办"（noop 纪律，防上下文膨胀加速协议淡化）。全部 worker 完成时 CronDelete 收尾。即使 cron 过期/失效，supervisor 被任何消息/用户输入唤醒时仍顺带执行同样的巡检（双保险）。机制实测依据见 `specs/2026-09-05-scheduled-supervision/claude_cron.md`。
+
+另：worker 空闲时宿主的 notify_when_idle 通知会刷新其活性时钟（idle ≠ 完成，不作督促触发器——worker 协议本就是不干完里程碑不上报）。
+
 ## watchdog（可选，推荐）
 
-supervisor 只在被消息/输入唤醒时巡检；cron watchdog 补上「长时间无人唤醒」的盲区：
+supervisor 活着时每 10 分钟定时自巡检（v2）；但定时 cron 调度器寄生在 supervisor 宿主进程里，supervisor 死则巡检死。cron watchdog 补上「supervisor 进程死亡无人巡检」的盲区：
 
 ```bash
 # 手动跑：项目目录 + 超时阈值（分钟，默认 60）
@@ -100,5 +106,6 @@ rm ~/.agent-mail/supervisor-watchdog
 | `watchdog.sh` | 外部逾期巡检脚本 |
 | `test_stopfailure.sh` | hook 回归测试（22 项断言） |
 | `test_watchdog.sh` | watchdog 回归测试（15 项断言） |
+| `specs/2026-09-05-scheduled-supervision/` | v2 spec/plan + 定时任务机制实测记录（claude_cron.md） |
 | `install.sh` | 安装 |
 | `DESIGN.md` | 技术设计原理 |
