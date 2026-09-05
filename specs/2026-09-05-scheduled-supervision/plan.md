@@ -135,7 +135,7 @@
 - [ ] DESIGN §2.3/§2.4/§3/§4.3 的 notify_when_idle 与轮询相关过时结论已修订（无"明确不用"残留）
 - [ ] 已知边界含 cron 寄生条目
 - [ ] claude_cron.md 已在 specs/ 目录内，README/DESIGN 引用仓内路径
-- [ ] 全文 grep 无 `sleep 300`、`无法定时醒来`、`不会定时醒来` 残留
+- [ ] 全文 grep 无 `sleep 300`、`无法定时醒来`、`不会定时醒来` 残留（**豁免**：DESIGN.md 三处 v1→v2 历史对照表述——"v1 用 Bash sleep 300…已废弃""supervisor v1 无法定时醒来，v2 起…""明确不用"节标题——属变更记录非现行行为描述）
 
 ---
 

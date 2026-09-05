@@ -132,7 +132,7 @@ worker 可能因 429 限流、网络故障、进程被杀而中断。防御机�
 
 **收到 `WORKER STATUS`**（worker 对 STATUS CHECK 的响应）：仅用于确认它活着并了解进度。刷新 `last_response_ts`，清空 `pending_check`。**不触发任何 APPROVE/REFINE/阶段流转**——正式流转只认 WORKER REPORT。
 
-**收到 worker idle 通知**（notify_when_idle，你 SendMessage 时附带订阅产生的宿主级信号）：**唯一动作：刷新该 worker 的 `last_response_ts`**——它证明 worker 进程活着且回合正常结束，是失联判定的最佳输入。**禁止**因"idle 到达但无对应 REPORT"而发督促消息：worker 协议本就是不干完里程碑不上报，长 Phase 中间每回合结束都会 idle，按 idle 督促会按回合频率轰炸正在干活的 worker，违反被动守卫。idle ≠ 完成；完成判定永远以 WORKER REPORT 为准；是否督促只走既有 60 分钟失联判定。（若本机制实际不可用，本节自动失效，不影响其他条款。）
+**收到 worker idle 通知**（notify_when_idle，宿主级信号）：**唯一动作：刷新该 worker 的 `last_response_ts`**——它证明 worker 进程活着且回合正常结束，是失联判定的最佳输入。前置条件：**你每次 SendMessage 给 worker 时附带 notify_when_idle 订阅**（随消息附带、非永久；你发给 worker 的每条消息都带）。**禁止**因"idle 到达但无对应 REPORT"而发督促消息：worker 协议本就是不干完里程碑不上报，长 Phase 中间每回合结束都会 idle，按 idle 督促会按回合频率轰炸正在干活的 worker，违反被动守卫。idle ≠ 完成；完成判定永远以 WORKER REPORT 为准；是否督促只走既有 60 分钟失联判定。（若本机制实际不可用，本节自动失效，不影响其他条款。）
 
 **收到 `WATCHDOG ALERT`**（watchdog 经 agent-mail 投递，含 worker 名/session_id/静默时长）：按巡检流程处理该 worker（STATUS CHECK / pending_check / 升级）。watchdog 自带告警去重（梯度升级），重复告警意味着静默在加深。
 
@@ -154,7 +154,7 @@ worker 会把待确认问题按三级标注后打包发给你。处理规则（�
 
 **Decide（决策）**：三选一（APPROVE / REFINE / ESCALATE）+ 阶段流转（见状态机）。决策写入 state.json 的 reviews。
 
-**Act（行动）**：用 `SendMessage` 把决策发给对应 worker，消息必须结构清晰：`VERDICT: APPROVE/REFINE + 下一步指令 + 具体问题清单（如有）`。不需要额外订阅完成信号——worker 协议已强制每个里程碑主动上报。更新 state.json（原子写）中该 worker 的 phase、reviews、`last_response_ts`（收到其任何主动消息时）与 `last_instruction_ts`（下发指令时）。
+**Act（行动）**：用 `SendMessage` 把决策发给对应 worker，消息必须结构清晰：`VERDICT: APPROVE/REFINE + 下一步指令 + 具体问题清单（如有）`。不需要额外订阅完成信号（idle 订阅仅作活性信号，见 idle 通知节）——worker 协议已强制每个里程碑主动上报。更新 state.json（原子写）中该 worker 的 phase、reviews、`last_response_ts`（收到其任何主动消息时）与 `last_instruction_ts`（下发指令时）。
 
 **ESCALATE 的去向**：ESCALATE 不发给 worker。停止推进，直接在本会话向用户输出完整僵局说明（冲突双方/连续 REFINE 记录/你建议的仲裁选项），等用户裁决后按裁决继续。
 
