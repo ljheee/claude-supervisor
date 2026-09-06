@@ -1,7 +1,7 @@
 # Plan: claude-supervisor v3 多 Supervisor 并存实施
 
 > 依据：`spec.md`（同目录）
-> 原则：core 协议语义零弱化（账本路径换根 + 新增局部条款：名称固定/sid 获取/resume 恢复/registry 四命令/cron 标识）；hook/watchdog 首次进入改动面（v3 spec 明确扩边界），每处改动配回归用例；全部新机制先实测后依赖（dev-0 沿用 rework 的前置实测纪律，六项已闭环）。
+> 原则：core 协议语义零弱化（账本路径换根 + 新增局部条款：名称固定/sid 获取/resume 恢复/registry 四命令/cron 标识）；hook/watchdog 首次进入改动面（v3 spec 明确扩边界），每处改动配回归用例；全部新机制先实测后依赖（dev-0 沿用 rework 的前置实测纪律，八项已闭环）。
 
 ## Phase 划分总览
 
@@ -21,7 +21,7 @@
 
 ## dev-0 前置实测（机制假设验证）
 
-不做未实测机制的关键路径依赖。八项独立，任一失败只影响对应设计决策，不阻塞其他项（第 4、7、8 项已实测通过并定案）。
+不做未实测机制的关键路径依赖。八项独立，任一失败只影响对应设计决策，不阻塞其他项。
 
 ### 实测项
 
@@ -60,7 +60,7 @@
 
 1. `_core-supervisor.md` 启动步骤 3：账本路径改为 `.supervisor/<本 supervisor session_id>/state.json`（分片目录随建）；启动步骤 2 改造（dev-0 实测驱动）：会话名固定（自动分配名或冲突时建议 /rename supervisor-<后缀>）+ sid 获取以 **SessionStart 注入行为主**（实测⑦：上下文中 SESSION_ID 行直接取；缺失时 fallback 扫 `~/.claude/sessions/` 注册表，**匹配规则：name 相等且 cwd==project-dir，仍多条报错换名禁止任选**，CR2 P1-4）；新增 resume 恢复流程（**触发双通道：source=resume 注入提示机械触发（实测⑦）+ 巡检 prompt 常驻首条自检兜底**，CR2 P1-3；恢复动作：旧名未被占用才 rename 回，被占用选新唯一名，CR2 P2-1 → register upsert → 汇报中断点）；**旧布局迁移条款**（平铺 state.json 存在 → 问用户：归档或原地保留；未答不建分片）。
 2. 启动步骤新增（编号顺延）：**registry 注册与并行隔离断言（单次事务，CR P0-2；前置于分片/cron 创建避免孤儿产物，CR2 P2-3）**——registry.py register 事务：无他人活跃条目直接写入；有他人活跃条目 → 打印列表 exit 2，锁外用户确认隔离后带 `--isolation-confirmed` 重试（重读校验他人活跃集合未新增，CR2 P1-2）；ESCALATE/叫停不写入条目。register 为按 sid 幂等 upsert（CR P1-1）；**事务含名称唯一性断言（dev-0 实测：SendMessage 只认名称）——与他人活跃条目撞名拒绝注册，要求先 /rename 唯一名**。
-3. **worker 身份登记改造（CR2 P0-1，实测⑦后简化）**：启动步骤 7 现行"用 ListAgents 解析发送方 session_id"失效——改为 WORKER REGISTER 消息内 worker **自报本会话 session_id**（从 SessionStart 注入行获得），supervisor 校验 36 位 UUID 格式后写 workers[]；自报缺失/非法时 fallback 扫 sessions 注册表（同消歧规则）；**WORKER REGISTER 消息模板同步增自报 sid 一行**。
+3. **worker 身份登记改造（CR2 P0-1，实测⑦后简化）**：启动步骤 7 现行"用 ListAgents 解析发送方 session_id"失效——改为 WORKER REGISTER 消息内 worker **自报本会话 session_id**（从 SessionStart 注入行获得），supervisor 校验 36 位 UUID 格式后写 workers[]；自报缺失/非法时 fallback 扫 sessions 注册表（同消歧规则）；**非 Claude worker（Codex agent-mail 桥）session_id 记 null，hook 层不覆盖（与 v2 一致）**；**WORKER REGISTER 消息模板同步增自报 sid 一行**。
 4. 启动步骤 6（cron）：查重标识改"监工定时巡检(<本 sid 完整 UUID>)"（碰撞类风险零容忍，见 spec F2），巡检 prompt 里的重建条款同步改标识（含"重建时用自己的完整 sid"）。
 5. 巡检步骤：新增 heartbeat_ts 更新（registry.py heartbeat，仅自己条目）；**新增 stale 活性检查条款（CR2 P2-2）**：按 name 检查他人条目活性（ListAgents 输出含该 name 即可达）、双条件（不可达且 heartbeat 超 30 分钟）、mark-stale 经 registry.py、绝不删他人。
 6. 收尾（状态机 dev-N 第 4 条）：CronDelete 同时从 registry 注销自己（registry.py unregister）。
