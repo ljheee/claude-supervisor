@@ -21,7 +21,7 @@
 
 ## dev-0 前置实测（机制假设验证）
 
-不做未实测机制的关键路径依赖。六项独立，任一失败只影响对应设计决策，不阻塞其他项（第 4 项已实测通过并定案）。
+不做未实测机制的关键路径依赖。八项独立，任一失败只影响对应设计决策，不阻塞其他项（第 4、7、8 项已实测通过并定案）。
 
 ### 实测项
 
@@ -30,20 +30,24 @@
 3. **worktree 下 hook 的 cwd 与 git 定位**（F4 前提）：linked worktree 中跑 `git rev-parse --git-common-dir`，确认输出主工作区 gitdir 且可推导主工作区根；确认 hook 在 worktree 中触发时的工作目录就是 worker cwd。
 4. **hook stdin 的 session_id 可用性**（F4 分片选择的身份来源）【已实测通过，2026-09-06】：探针 hook（项目级 settings.json，Stop 事件 cat stdin 落盘）+ `claude -p` 实测——stdin JSON 确含 `session_id` 字段，36 位 UUID 格式，与 transcript_path 首行 sessionId 及 projects 目录名三方一致。额外可用字段：`prompt_id`（可作 worker 回合标识）、`cwd`、`transcript_path`。F4 身份源定案：hook stdin session_id。
 5. **flock 可用性**（F1 前提）：macOS 无原生 /usr/bin/flock（CR 实测确认，仅 shlock）——定案方案已改为 registry.py 助手脚本（python fcntl），本项实测 registry.py 原型：fcntl 持锁读-改-写 + 锁超时语义 + 并发首建（两进程同时 register 无丢失/重复）；四个子命令（register/heartbeat/unregister/mark-stale，作者终审补充）逐一验证。
-6. **resume 保 sid 不变性**（分片键基石假设，CR P1-1）：起一个会话记下 ListAgents 中的 session_id → `claude --resume <sid>` 重开 → ListAgents 再比对——sid 不变则分片键成立；顺带验证 idle 存活会话在 ListAgents 的可见性（stale 判定"可达"语义依赖它）。若 sid 会变，分片键方案回炉重设计。
+6. **resume 保 sid 不变性**（分片键基石假设，CR P1-1）：起一个会话记下 ListAgents 中的 session_id → `claude --resume <sid>` 重开 → ListAgents 再比对——sid 不变则分片键成立；顺带验证 idle 存活会话在 ListAgents 的可见性（stale 判定“可达”语义依赖它）。若 sid 会变，分片键方案回炉重设计。
+7. **SessionStart hook stdout 注入上下文**（sid 获取 hook 化的前提）：项目级探针 hook 输出含 session_id 的一行 → `claude -p` 问会话能否复述——能注入则 supervisor/worker 双方的 sid 获取可改为机械注入，替代扫 sessions 注册表；顺带验证 resume 时 SessionStart 是否再触发（resume 恢复流程机械触发的前提）。
+8. **PreToolUse exit 2 拦截 + stderr 反馈**（分片键守卫的前提）：PreToolUse 探针对特定路径 Write 返回 exit 2 + stderr → 验证工具调用被拦截、stderr 内容能否反馈给模型——两项都成立则“LLM 选错 sid 写错分片”可机械阻断。
 
-### 实测记录（2026-09-06，六项全部闭环）
+### 实测记录（2026-09-06，八项全部闭环）
 
 1. **CronList 跨会话可见性：不跨会话可见**。终端 B 的 CronList 显示 No scheduled jobs（A 的 session-only 任务对 B 不可见）——多 supervisor 巡检天然隔离，互不吞并的风险实测不存在；cron 查重键的职责收窄为防同会话协议重注入（UUID 标识保留但理由更新）。
 2. **SendMessage 寻址：只认会话名称**。UUID 形态与 6 位短 ID 均返回 "No agent named ... is reachable"（两轮对照确证）；名称双向寻址成功（test-97 ↔ test-98 各拿到 msg_id）。**spec F3 的"按 session_id 寻址"不成立，回炉为名称寻址 + 唯一性管理**。
 3. **worktree git 定位：通过**。`git rev-parse --git-common-dir` 输出主工作区 .git，取父目录即主工作区根，其下 .supervisor/ 可达；worktree 自身目录无 .supervisor/（特判必要且充分）。
 4. **hook stdin session_id：通过**（子代理实测）。stdin JSON 含 session_id（36 位 UUID，与 transcript 首行及 projects 目录名三方一致）；额外可用：prompt_id/cwd/transcript_path。
 5. **registry.py 原型：通过**。四子命令语义全验证（幂等 upsert/心跳/stale/注销/错误退出码 2）；并发首建竞态：两进程同时 register，fcntl 锁串行化，无丢失无重复。
-6. **resume 保 sid：通过，但会话名重分配**。`claude --resume <uuid>` 成功恢复同一 UUID 会话（sid 持久）；**会话名从 test-98 变为 test-34、短 ID 同变**——会话名是进程生命周期属性，不是持久身份。**推论：supervisor resume 后 worker 手里的旧名字立即失效，必须写恢复流程**。另实测：当前版本 ListAgents **不输出 36 位 UUID**（仅名字+短 ID+状态），v2 存量条款"从 ListAgents 推导 sessionId"失效，sid 获取路径改为扫 `~/.claude/sessions/` 注册表按名字匹配取 sessionId（hook pass-2 同源）。
+6. **resume 保 sid：通过，但会话名重分配**。`claude --resume <uuid>` 成功恢复同一 UUID 会话（sid 持久）；**会话名从 test-98 变为 test-34、短 ID 同变**——会话名是进程生命周期属性，不是持久身份。**推论：supervisor resume 后 worker 手里的旧名字立即失效，必须写恢复流程**。另实测：当前版本 ListAgents **不输出 36 位 UUID**（仅名字+短 ID+状态），v2 存量条款“从 ListAgents 推导 sessionId”失效，sid 获取路径改为扫 `~/.claude/sessions/` 注册表按名字匹配取 sessionId（hook pass-2 同源）。
+7. **SessionStart stdout 注入：通过**（2026-09-04 补测）。探针 hook（项目级 settings.json）stdin JSON 含 session_id/source/cwd/hook_event_name/transcript_path 五字段；stdout 输出一行标记，`claude -p` 会话能逐字复述该行（含注入的 36 位 UUID）；**resume 场景 SessionStart 再触发**（source=resume），sid 与原会话一致（分片键假设二次佐证）。**定案：sid 获取可 hook 化**——SessionStart 注入为主、sessions 注册表扫描降级为 fallback；worker 可开局即知自身 sid 并写进 WORKER REGISTER（supervisor 侧免扫）；resume 恢复流程可机械触发（source=resume 时注入核对提示）。
+8. **PreToolUse 拦截反馈：通过**（2026-09-04 补测）。exit 2 + stderr 拒绝特定路径的 Write——文件确认未创建（拦截真生效），且模型能逐字复述 stderr 中 DENIED_BY_GUARD 拒绝信息（含守卫提供的正确分片键提示）。**定案：分片键守卫可 hook 化**——“LLM 选错 sid 写错分片”可用 dumb 守卫机械阻断，stderr 可作纠错信道。
 
 ### DoD
 
-- [x] 六项实测结论已回填（含两项推翻设计假设的发现：SendMessage 名称寻址、ListAgents 无 UUID）
+- [x] 八项实测结论已回填（含两项推翻设计假设的发现：SendMessage 名称寻址、ListAgents 无 UUID；两项 hook 化可行性坐实：SessionStart 注入、PreToolUse 拦截反馈）
 - [x] registry.py 原型锁语义定案；resume sid 结论定案（成立，附名字重分配的补偿设计）
 - [x] 实测产生的临时会话/文件已清理（测试会话已退出，/tmp 产物已删）
 - [x] spec 实测驱动修订已落地（F1/F2/F3 三处 + 复审补修：F4 归档多命中逻辑矛盾、F1 活性检查改按 name、零回归允许项扩六类）
