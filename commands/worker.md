@@ -28,15 +28,20 @@ Phase: <当前 phase>
 
 ## 注册步骤（立即执行）
 
-1. 用 `ListAgents` 找到 Supervisor 会话（名字通常是 supervisor，或用户在参数里指定的 `--supervisor <名字>`）。找不到时不要直接失败：把 `ListAgents` 列出的其他会话名展示给用户，请用户确认监工会话名或告知监工尚未启动（可提示用户在监工终端执行 `/rename supervisor` 固定名字后重试），然后停止等待用户输入。（注意：会话名后的方括号短哈希不是 session_id，你不需要主动记录它；supervisor 会负责双方的身份登记。）
-2. 用 `SendMessage` 向 Supervisor 发送注册消息，格式：
+1. **发现监工**：读 `<当前目录>/.supervisor/registry.json`（只读；文件不存在或无活跃条目时视为无）。四分支：
+   - **唯一活跃（非 stale）条目** → 直接以该条目的 name 为监工目标（SendMessage 只认会话名称，dev-0 实测 UUID/短 ID 均不可达）。
+   - **多个活跃条目** → 把列表（name / mode / goal 摘要 / branch）展示给用户，请用户指定监工名，等待用户输入。
+   - **无活跃条目 / registry 不存在** → 若用户在参数里给了 `--supervisor <会话名>`（会话名称，SendMessage 唯一可用寻址键，必须唯一；同名多条时请用户先让监工 `/rename` 唯一名后重试——`<名>[<短ID>]` 消歧形式未经实测，勿依赖），用 `ListAgents` 按名字找到它；仍找不到 → 提示监工未启动（可提示用户在监工终端 `/rename supervisor-<后缀>` 固定名字后重试），停止等待用户输入。
+2. 用 `SendMessage` 按监工名发送注册消息，格式：
    ```
    WORKER REGISTER
    项目目录: <当前目录绝对路径>
    当前 git 分支: <git branch 输出>
+   本会话 session_id: <36 位 UUID——从上下文开头的 SESSION_ID 注入行取；无注入行则扫 ~/.claude/sessions/ 注册表按 cwd 匹配自取；取不到则省略本行，supervisor 会扫描交叉验证>
    等待初始指令
    ```
 3. 之后等待 Supervisor 的指令到来（消息会自动送达），按指令工作。
+4. **SendMessage 按监工名发送失败**（监工名不可达：可能是 supervisor resume 后名字被重分配的窗口期，或疑似死条目）：立即向用户报告并附三选项清单：① resume 该 supervisor（推荐，恢复流程收尾后名字重新可达）；② 稍后重试（可能仅是 resume 窗口期，稍安勿躁）；③ 确认监工不回来 → 转自主模式兜底：完成当前 phase 已下发的指令并 commit（git log 为证），**不自行流转 phase**（phase 裁决由用户临时代行），监工恢复或用户接手后补审。
 
 **名字保持稳定**：注册后不要 `/rename`（Supervisor 靠 session_id 识别你，但名字是人和它展示用的锚点）；若 Supervisor 要求你换名（与他人重名），换名后重新发一次 WORKER REGISTER。
 
@@ -107,13 +112,13 @@ Phase: <中断时所处的 phase>
 
 - 开工前从 supervisor 的初始指令里确认自己的 scope，**只改 scope 内的文件**。
 - 每完成一个 Phase 必须立即 commit（消息注明 `worker: <你的名>, phase: dev-N`），**只提交 scope 内且属于本 Phase 的文件**（明确 `git add <文件>`，禁止 `git add -A`/`git add .`，避免裹挟用户或其他 worker 的未提交改动）；不要跨 Phase 囤积未提交改动，你的未提交改动就是其他 worker 的地雷。
-- `.supervisor/` 目录是监工的账本，永不 add、永不修改。
+- `.supervisor/` 目录是监工的账本：整体**永不 add**（账本不进 git）；registry.json 与各分片目录（`<sid>/`）对 worker **只读**，分片内容禁碰。
 - 若 supervisor 为你指定了独立分支或 worktree，在指定分支/worktree 上工作；否则默认在同一分支上靠 commit 纪律 + scope 隔离。
 - 发现其他 worker 的改动与你的冲突（同文件、同函数），不要直接改掉，上报 supervisor 仲裁。
 
 ## 行为红线
 
-- 永远不要改 Supervisor 的 `.supervisor/state.json`（那是它的全局账本）。
+- 对 `.supervisor/` 只读：registry.json 只读，各分片内容（state.json / interrupts.jsonl / acknowledged.jsonl 等）禁碰——那是监工的账本，你写一个字都会污染它的并发与审计语义。
 - 破坏性操作的用户授权请求直接问用户，不许放进 WORKER QUESTIONS 包让 Supervisor 代答。
 
 现在开始执行注册步骤。

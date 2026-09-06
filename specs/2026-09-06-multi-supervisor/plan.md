@@ -70,10 +70,10 @@
 
 ### DoD
 
-- [ ] diff 归类清单落本 plan 附录（每条：所属允许类 / 语义等价说明）——已随 dev-1 完成落附录 A
-- [ ] grep 核对：全文无残留平铺路径引用（`\.supervisor/state.json`、`\.supervisor/interrupts` 旧形态；**旧布局迁移条款本身必需的平铺路径字样豁免——按行含"归档/迁移/平铺"关键词排除，CR3 P2-2**）
-- [ ] grep 核对：registry.py 调用条款（register/heartbeat/unregister/mark-stale 四时机）、stale 判定（双条件）、"绝不删他人条目"在 core 中均为命令式表述；core 明文禁止 LLM 直接编辑 registry.json；**调用写法均为绝对路径 `~/.agent-mail/registry.py ...`（无裸 registry.py，CR3 P2-4）**
-- [ ] grep 核对：`"启动步骤第"` 交叉引用逐条与新编号一致（CR3 P1-2）
+- [x] diff 归类清单落本 plan 附录（每条：所属允许类 / 语义等价说明）——已随 dev-1 完成落附录 A
+- [x] grep 核对：全文无残留平铺路径引用（`\.supervisor/state.json`、`\.supervisor/interrupts` 旧形态；**旧布局迁移条款本身必需的平铺路径字样豁免——按行含"归档/迁移/平铺"关键词排除，CR3 P2-2**）
+- [x] grep 核对：registry.py 调用条款（register/heartbeat/unregister/mark-stale 四时机）、stale 判定（双条件）、"绝不删他人条目"在 core 中均为命令式表述；core 明文禁止 LLM 直接编辑 registry.json；**调用写法均为绝对路径 `~/.agent-mail/registry.py ...`（无裸 registry.py，CR3 P2-4）**
+- [x] grep 核对：`"启动步骤第"` 交叉引用逐条与新编号一致（CR3 P1-2）
 
 ### 附录 A：dev-1 diff 归类清单（2026-09-04，拼接产物 diff 逐条）
 
@@ -110,9 +110,9 @@
 
 ### DoD
 
-- [ ] 注册步骤四分支齐全（唯一/多条/无条目/参数指定），每分支命令式
-- [ ] 红线两处一致，无"永不修改"与"只读"措辞冲突
-- [ ] worker.md 行数增量 ≤ 24 行（含死条目三选项清单与自报 sid，CR3 P2-7 放宽；超限则压缩三选项为简式）
+- [x] 注册步骤四分支齐全（唯一/多条/无条目/参数指定），每分支命令式
+- [x] 红线两处一致，无"永不修改"与"只读"措辞冲突
+- [x] worker.md 行数增量 ≤ 24 行（含死条目三选项清单与自报 sid，CR3 P2-7 放宽；超限则压缩三选项为简式）
 
 ---
 
