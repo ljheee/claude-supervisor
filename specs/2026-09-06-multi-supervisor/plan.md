@@ -7,10 +7,10 @@
 
 | Phase | 内容 | 改动文件 | 依赖 |
 |---|---|---|---|
-| dev-0 | 前置实测 ×6：机制假设逐项验证 | 无产物（实测记录写回本 plan；第 4 项已实测通过） | 无 |
-| dev-1 | core 协议改造（分片账本 + registry 四命令三时机 + cron 标识） | commands/_core-supervisor.md | dev-0 |
-| dev-2 | worker.md 发现改造 | commands/worker.md | dev-0 |
-| dev-3 | hook 多分片解析 + worktree 支持 | hooks/worker-stopfailure.py, test_stopfailure.sh | dev-0 |
+| dev-0 | 前置实测 ×8：机制假设逐项验证（含 hook 化两项补测） | 无产物（实测记录写回本 plan） | 无 |
+| dev-1 | core 协议改造（分片账本 + registry 四命令三时机 + cron 标识 + sid 获取注入行化） | commands/_core-supervisor.md | dev-0 |
+| dev-2 | worker.md 发现改造（自报 sid + registry 四分支 + 红线精确化） | commands/worker.md | dev-0 |
+| dev-3 | hook 层改造（SessionStart 注入器 + PreToolUse 守卫 + StopFailure 多分片解析 + worktree） | hooks/, test_stopfailure.sh | dev-0 |
 | dev-4 | watchdog 分片适配 | watchdog.sh, test_watchdog.sh | dev-0 |
 | dev-5 | install.sh + README/DESIGN 同步 | install.sh, README.md, DESIGN.md | dev-1~4 |
 | dev-6 | 回归 + 双 supervisor 冒烟实测 + 收尾 | 全部 | dev-0~5 |
@@ -58,15 +58,15 @@
 
 ### 步骤
 
-1. `_core-supervisor.md` 启动步骤 3：账本路径改为 `.supervisor/<本 supervisor session_id>/state.json`（分片目录随建）；启动步骤 2 改造（dev-0 实测驱动）：会话名固定（自动分配名或冲突时建议 /rename supervisor-<后缀>）+ sid 从 `~/.claude/sessions/` 注册表取（**匹配规则：name 相等且 cwd==project-dir，仍多条报错换名禁止任选**，CR2 P1-4）；新增 resume 恢复流程（**触发：巡检 prompt 常驻首条自检"本方条目 name 不符/stale/缺失→走恢复流程"**，CR2 P1-3；恢复动作：旧名未被占用才 rename 回，被占用选新唯一名，CR2 P2-1 → register upsert → 汇报中断点）；**旧布局迁移条款**（平铺 state.json 存在 → 问用户：归档或原地保留；未答不建分片）。
+1. `_core-supervisor.md` 启动步骤 3：账本路径改为 `.supervisor/<本 supervisor session_id>/state.json`（分片目录随建）；启动步骤 2 改造（dev-0 实测驱动）：会话名固定（自动分配名或冲突时建议 /rename supervisor-<后缀>）+ sid 获取以 **SessionStart 注入行为主**（实测⑦：上下文中 SESSION_ID 行直接取；缺失时 fallback 扫 `~/.claude/sessions/` 注册表，**匹配规则：name 相等且 cwd==project-dir，仍多条报错换名禁止任选**，CR2 P1-4）；新增 resume 恢复流程（**触发双通道：source=resume 注入提示机械触发（实测⑦）+ 巡检 prompt 常驻首条自检兜底**，CR2 P1-3；恢复动作：旧名未被占用才 rename 回，被占用选新唯一名，CR2 P2-1 → register upsert → 汇报中断点）；**旧布局迁移条款**（平铺 state.json 存在 → 问用户：归档或原地保留；未答不建分片）。
 2. 启动步骤新增（编号顺延）：**registry 注册与并行隔离断言（单次事务，CR P0-2；前置于分片/cron 创建避免孤儿产物，CR2 P2-3）**——registry.py register 事务：无他人活跃条目直接写入；有他人活跃条目 → 打印列表 exit 2，锁外用户确认隔离后带 `--isolation-confirmed` 重试（重读校验他人活跃集合未新增，CR2 P1-2）；ESCALATE/叫停不写入条目。register 为按 sid 幂等 upsert（CR P1-1）；**事务含名称唯一性断言（dev-0 实测：SendMessage 只认名称）——与他人活跃条目撞名拒绝注册，要求先 /rename 唯一名**。
-3. **worker 身份登记改造（CR2 P0-1）**：启动步骤 7 现行"用 ListAgents 解析发送方 session_id"失效——改为收到 WORKER REGISTER 后按发送方 name 且 cwd==project_dir 扫 `~/.claude/sessions/` 取 sessionId 写 workers[]（同消歧规则）；取错则 hook 身份门禁整层失效。
+3. **worker 身份登记改造（CR2 P0-1，实测⑦后简化）**：启动步骤 7 现行"用 ListAgents 解析发送方 session_id"失效——改为 WORKER REGISTER 消息内 worker **自报本会话 session_id**（从 SessionStart 注入行获得），supervisor 校验 36 位 UUID 格式后写 workers[]；自报缺失/非法时 fallback 扫 sessions 注册表（同消歧规则）；**WORKER REGISTER 消息模板同步增自报 sid 一行**。
 4. 启动步骤 6（cron）：查重标识改"监工定时巡检(<本 sid 完整 UUID>)"（碰撞类风险零容忍，见 spec F2），巡检 prompt 里的重建条款同步改标识（含"重建时用自己的完整 sid"）。
 5. 巡检步骤：新增 heartbeat_ts 更新（registry.py heartbeat，仅自己条目）；**新增 stale 活性检查条款（CR2 P2-2）**：按 name 检查他人条目活性（ListAgents 输出含该 name 即可达）、双条件（不可达且 heartbeat 超 30 分钟）、mark-stale 经 registry.py、绝不删他人。
 6. 收尾（状态机 dev-N 第 4 条）：CronDelete 同时从 registry 注销自己（registry.py unregister）。
 7. `interrupts.jsonl`/`acknowledged.jsonl` 全部路径引用改分片路径（grep 逐处核对：中断补课条含两文件、落账条款 acknowledged 一处——以 grep DoD 为准，不依赖计数）。
-8. 顺手修存量漂移四处：启动步骤 2 "hook 靠 supervisor_session_id 前缀匹配"改"精确匹配"（CR P2-1）；"唤醒 worker 用 SendMessage 按会话寻址"改"按名称寻址（SendMessage 唯一可用键，dev-0 实测）"；"name 仅供展示"补"但它是消息路由的硬依赖"；启动步骤 7 "用 ListAgents 解析发送方会话，取得其 session_id"改按 sessions 注册表扫描（CR2 P0-1，此项已提升为步骤 3 专项）。
-9. 拼接门禁：`cat` 两模式层 + 新 core，与 v3 前拼接产物 diff——允许项仅限七类（与 spec DoD 5 一致）：路径换根、registry 注册心跳注销 stale 各一句、cron 标识改写、旧布局迁移条款、resume 恢复与名称固定与 worker 登记改造新增条款、存量措辞修正四处、注册前置于分片/cron 的顺序调整。逐条归类，语义条款零丢失零弱化（沿用零回归 diff 门禁方法学）。
+8. 顺手修存量漂移四处：启动步骤 2 "hook 靠 supervisor_session_id 前缀匹配"改"精确匹配"（CR P2-1）；"唤醒 worker 用 SendMessage 按会话寻址"改"按名称寻址（SendMessage 唯一可用键，dev-0 实测）"；"name 仅供展示"补"但它是消息路由的硬依赖"；启动步骤 7 "用 ListAgents 解析发送方会话，取得其 session_id"改"worker 自报 sid（SessionStart 注入行，实测⑦）为主"（CR2 P0-1，此项已提升为步骤 3 专项）。
+9. 拼接门禁：`cat` 两模式层 + 新 core，与 v3 前拼接产物 diff——允许项仅限八类（与 spec DoD 5 一致）：路径换根、registry 注册心跳注销 stale 各一句、cron 标识改写、旧布局迁移条款、resume 恢复（双通道触发）与名称固定与 worker 登记（自报主+扫描 fallback）改造新增条款、WORKER REGISTER 模板增自报 sid 一行、存量措辞修正四处（含 ListAgents 推导 sid→注入行为主/扫描 fallback）、注册前置于分片/cron 的顺序调整。逐条归类，语义条款零丢失零弱化（沿用零回归 diff 门禁方法学）。
 
 ### DoD
 
@@ -81,9 +81,9 @@
 ### 步骤
 
 1. 注册步骤 1 重写：读 registry → 唯一活跃条目直接选 / 多条目展示（name/mode/goal_brief/branch）请用户指定 / 无条目走现行 ListAgents 兜底。
-2. `--supervisor` 参数：接受**会话名称**（必须唯一，SendMessage 唯一可用寻址键——dev-0 实测 UUID/短 ID 均不可达；同名多条用 `<名>[<短ID>]` 消歧），frontmatter argument-hint 同步；另加一条：worker 按监工名 SendMessage 失败时按"疑似死条目"路径报告用户并附三选项清单（resume / 稍后重试 / 转自主模式兜底：完成当前 phase 指令并 commit、不自行流转 phase、恢复后补审）（supervisor resume 重分配名字的窗口期同用此路径）。
+2. `--supervisor` 参数：接受**会话名称**（必须唯一，SendMessage 唯一可用寻址键——dev-0 实测 UUID/短 ID 均不可达；同名多条用 `<名>[<短ID>]` 消歧），frontmatter argument-hint 同步；**WORKER REGISTER 消息模板增自报 sid 一行**（从 SessionStart 注入行取，实测⑦；缺失时扫 sessions 注册表）；另加一条：worker 按监工名 SendMessage 失败时按"疑似死条目"路径报告用户并附三选项清单（resume / 稍后重试 / 转自主模式兜底：完成当前 phase 指令并 commit、不自行流转 phase、恢复后补审）（supervisor resume 重分配名字的窗口期同用此路径）。
 3. 红线精确化："`.supervisor/` 永不 add、永不修改" → "registry.json 与分片目录**只读**；分片内容禁碰；`.supervisor/` 整体永不 add"。两处红线（并行协作纪律节 + 行为红线节）同步改。
-4. 注册消息格式不动；执行协议主体不动。
+4. 注册消息唯一改动（自报 sid 一行，dev-1 步骤 3 同步）；执行协议主体不动。
 
 ### DoD
 
@@ -93,22 +93,24 @@
 
 ---
 
-## dev-3 hook 多分片解析 + worktree（F4）
+## dev-3 hook 层改造（F4：注入器 + 守卫 + StopFailure 多分片解析 + worktree）
 
 ### 步骤
 
-1. `find_state_upward` 改造：`.supervisor/` 存在时先扫分片（**UUID 目录名白名单**，archive/ 与非 UUID 目录不可见，CR P0-1）；零分片回退平铺。返回 (state_dict, shard_dir) 二元组。
-2. 分片选择：用 dev-0 实测定案的身份源（hook stdin 的 session_id）匹配分片的 `workers[].session_id`；sid 命中多个**活跃分片**（同 worker 先后注册进两个 supervisor 的形态）时取 registered_at 最新，仍不唯一不投递（归档分片因 UUID 白名单不可见，不进命中集合——复审补修：原"归档多命中"场景与白名单矛盾）。
-3. `resolve_supervisor` pass-2 收紧：分片数 > 1 时禁用 pass-2，仅 supervisor_session_id 精确匹配（CR P1-4）。
-4. worktree：向上找不到 `.supervisor/` 时，`git rev-parse --git-common-dir` 推主工作区根再找（仅当 start_dir 在 git 仓库内）。
-5. interrupts.jsonl 落盘路径随选中分片。
-6. test_stopfailure.sh 扩展六用例：多分片定向投递 / 多分片无匹配（含双命中歧义）不投递 / 平铺回退（零分片时）/ worktree 发现（临时建 linked worktree）/ archive 不被扫描 / 双 supervisor 名字碰撞且目标 sid 死 → 不投递。
+1. **新增 `hooks/session-start-injector.py`**（实测⑦背书）：读 stdin 取 session_id/source，stdout 单行 `SESSION_ID <uuid> <source>`；source=resume 时追加 supervisor 核对提示行（读 registry 本方条目引导）；零判断 dumb 脚本，不读文件不写状态，异常静默 exit 0。
+2. **新增 `hooks/shard-guard.py`**（实测⑧背书）：PreToolUse(Write|Edit)——tool_input.file_path 不含 `.supervisor/` 先短路（纯字符串判断直接 exit 0，不起解释器不解析 JSON）；疑似命中才解析，路径 uuid 与 stdin session_id 等值校验，不等 exit 2 + stderr 给正确 sid；archive/ 平铺写入放行。
+3. `find_state_upward` 改造：`.supervisor/` 存在时先扫分片（**UUID 目录名白名单**，archive/ 与非 UUID 目录不可见，CR P0-1）；零分片回退平铺。返回 (state_dict, shard_dir) 二元组。
+4. 分片选择：用 dev-0 实测定案的身份源（hook stdin 的 session_id）匹配分片的 `workers[].session_id`；sid 命中多个**活跃分片**（同 worker 先后注册进两个 supervisor 的形态）时取 registered_at 最新，仍不唯一不投递（归档分片因 UUID 白名单不可见，不进命中集合——复审补修：原"归档多命中"场景与白名单矛盾）。
+5. `resolve_supervisor` pass-2 收紧：分片数 > 1 时禁用 pass-2，仅 supervisor_session_id 精确匹配（CR P1-4）。
+6. worktree：向上找不到 `.supervisor/` 时，`git rev-parse --git-common-dir` 推主工作区根再找（仅当 start_dir 在 git 仓库内）。
+7. interrupts.jsonl 落盘路径随选中分片。
+8. test_stopfailure.sh 扩展用例：原六用例（多分片定向投递 / 多分片无匹配含双命中歧义不投递 / 平铺回退零分片时 / worktree 发现临时建 linked worktree / archive 不被扫描 / 双 supervisor 名字碰撞且目标 sid 死→不投递）+ 新增两 hook 用例：注入器（startup/resume 两种 source 输出、异常静默 exit 0）、守卫（正确分片放行 / 错 sid deny + stderr 含正确 sid / 短路路径零 JSON 解析 / archive 与平铺写入放行）。
 
 ### DoD
 
 - [ ] 既有用例零改动全绿（存量行为不回归）
-- [ ] 新增六用例全绿
-- [ ] hook 对分片目录的写操作仅 interrupts.jsonl 一处（grep 核对无越权写）
+- [ ] 新增六用例全绿；注入器两断言 + 守卫四断言全绿
+- [ ] hook 对分片目录的写操作仅 interrupts.jsonl 一处（grep 核对无越权写）；注入器零文件读写、守卫零文件写（grep 核对）
 
 ---
 
@@ -133,16 +135,16 @@
 
 ### 步骤
 
-1. install.sh：新增 `registry.py` 安装（与 watchdog 同目录同方式，CR P1-3）；收尾 echo 补多 supervisor 用法一句 + 平铺路径表述改分片语义（`.supervisor/interrupts.jsonl` → `.supervisor/<sid>/interrupts.jsonl`，CR P2-4）；其余零改动（拼接断言不受影响——core 新增内容全部落在既有节内，无新 `## ` 标题）。
+1. install.sh：新增 `registry.py` 安装（与 watchdog 同目录同方式，CR P1-3）；**新增两 hook 安装与 settings.json 注册**（SessionStart→注入器、PreToolUse(Write|Edit matcher)→守卫，与既有 StopFailure 注册同模式，重装幂等不重复追加）；收尾 echo 补多 supervisor 用法一句 + 平铺路径表述改分片语义（`.supervisor/interrupts.jsonl` → `.supervisor/<sid>/interrupts.jsonl`，CR P2-4）；其余零改动（拼接断言不受影响——core 新增内容全部落在既有节内，无新 `## ` 标题）。
 2. README：多 supervisor 并存用法节（分支/worktree 隔离警示）、`--supervisor <会话名>` 说明（CR2 P1-5 修正）、旧账本归档说明、registry.json 进文件清单（运行时产物说明）。
-3. DESIGN 新增第 13 节（六要素：分层动机/分片键选型/registry.py 锁载体取舍/物理隔离裁决/死条目不对称处置/UUID 白名单 archive 隔离）+ §9 已知边界补"同分支混行不支持"。
+3. DESIGN 新增第 13 节（七要素：分层动机/分片键选型/registry.py 锁载体取舍/物理隔离裁决/死条目不对称处置/UUID 白名单 archive 隔离/**hook 化三件套取舍**——sid 获取与分片键防错升级为机械保证、PostToolUse 自动 register 评估后未纳入的理由）+ §9 已知边界补"同分支混行不支持"。
 4. 行数实测回填 DESIGN 体积预算（core/worker 增量）。
 
 ### DoD
 
 - [ ] grep 无过时表述（"单 supervisor"/"唯一监工"类与 v3 矛盾的措辞）
-- [ ] DESIGN 13 节六要素齐全，行数与实测一致
-- [ ] install.sh 重装幂等（产物 diff 为空）
+- [ ] DESIGN 13 节七要素齐全，行数与实测一致
+- [ ] install.sh 重装幂等（产物 diff 为空；settings.json hook 注册不重复追加）
 
 ---
 
@@ -151,7 +153,7 @@
 ### 步骤
 
 1. 全量回归：test_stopfailure.sh（含新用例）+ test_watchdog.sh（含新用例）。
-2. 本地真实安装 + 单 supervisor 注入实测（/supervisor 与 /rework 各一，验证分片账本落位、registry 注册、旧布局迁移询问分支）。
+2. 本地真实安装 + 单 supervisor 注入实测（/supervisor 与 /rework 各一，验证分片账本落位、registry 注册、旧布局迁移询问分支）；**hook 化真机验证**：安装后会话上下文可见 SESSION_ID 注入行（实测⑦工程化落地）、守卫对错 sid 写分片的真实拦截与 stderr 纠错。
 3. **双 supervisor 冒烟**（spec DoD 2）：同 project-dir 起 greenfield + rework 双 supervisor → 各自 worker 注册路由正确（**workers[].session_id 为真 UUID 且 hook 可命中**，CR2 P0-1 下游检查）→ 账本互不可见 → **各自终端 CronList 各见且仅见本方 UUID 巡检（跨会话不可见即隔离证据，CR2 P1-1）** → 一方收尾注销 → registry 只剩另一方；**registry 并发首建竞态合成测试**（CR P2-3）；**`<名>[<短ID>]` 消歧语法实测（失败则删形式改提示 rename，CR2 P2-5）**；**register 两阶段事务实测（--isolation-confirmed 流程，CR2 P1-2）**。全程最小目标，走完注册与首轮上报即可，不做完整项目。
 4. worktree 冒烟（spec DoD 4）：linked worktree 中触发 StopFailure（模拟），验证投递到所属分片。
 5. spec §6 五项 DoD 逐条勾验；挂账清单汇总；最终 commit。**补验 dev-0 第 6 项遗留子项（CR2 P2-7）：idle 存活会话在 ListAgents 的可见性**（stale 按 name 判可达的语义依赖；不可见则 stale 退化纯 heartbeat 判定，需回填结论）。
