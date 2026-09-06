@@ -25,9 +25,13 @@
 # ignored: a STATUS CHECK from the supervisor must NOT reset the clock,
 # otherwise "alert -> check -> clock reset" loops forever without escalation.
 #
-# Alert de-duplication: per-worker state in the shard's watchdog_state.json;
+# Alert de-duplication: per-worker state in the shard's watchdog_state.json,
+# keyed by worker session_id (same-name workers must not share one ladder);
 # re-alert only when silence grew by another full threshold (escalation
-# ladder: T, 2T, 3T, ...) or the entry is new. First alert at T.
+# ladder: T, 2T, 3T, ...) or the entry is new. First alert at T. The basis
+# (max worker-originated ts the silence was measured against) is snapshotted
+# per entry: if the worker RECOVERED in between (basis moved forward), the
+# ladder resets and the next silence episode alerts from scratch.
 #
 # Usage:   supervisor-watchdog <project-dir> [threshold_minutes]   (default 60)
 # Cron:    */10 * * * * ~/.agent-mail/supervisor-watchdog '/path/to/repo' 60
@@ -168,7 +172,20 @@ def worker_silence_min(w):
     ts = max([c for c in cands if c], default=None)
     if ts is None:
         return None
-    return int((datetime.datetime.now() - ts).total_seconds() // 60)
+    return int((datetime.datetime.now() - ts).total_seconds() // 60), ts.isoformat()
+
+
+def worker_basis(w):
+    """Stable snapshot of the max worker-originated timestamp (ISO string):
+    stored in the dedup record; if it changes between runs the worker has
+    RECOVERED since the last alert and the escalation ladder resets."""
+    cands = [
+        parse_ts(w.get("last_report_ts")),
+        parse_ts(w.get("last_response_ts")),
+        parse_ts(w.get("registered_at")),
+    ]
+    ts = max([c for c in cands if c], default=None)
+    return ts.isoformat() if ts is not None else None
 
 
 # ---- enumerate ledgers: UUID shards first, flat fallback when zero shards ----
@@ -202,15 +219,18 @@ for st, ledger_dir in ledgers:
     if st.get("done"):
         continue
 
-    overdue = []  # (name, session_id, phase, silence_min)
+    overdue = []  # (name, session_id, phase, silence_min, basis)
     for w in st.get("workers") or []:
         if not isinstance(w, dict) or w.get("phase") == "done":
             continue
         m = worker_silence_min(w)
-        if m is not None and m > threshold_min:
+        if m is None:
+            continue
+        minutes, basis = m
+        if minutes > threshold_min:
             overdue.append((str(w.get("name") or "?"),
                             str(w.get("session_id") or "(未记录)"),
-                            str(w.get("phase") or "?"), m))
+                            str(w.get("phase") or "?"), minutes, basis))
     if not overdue:
         continue
 
@@ -226,14 +246,20 @@ for st, ledger_dir in ledgers:
         wd_state = {}
 
     to_alert = []
-    for name, sid, phase, m in overdue:
-        rec = wd_state.get(name) or {}
+    for name, sid, phase, m, basis in overdue:
+        rec = wd_state.get(sid) or {}
         prev = rec.get("last_alert_silence_min")
+        prev_basis = rec.get("basis")
+        # ladder reset: the worker reported/responded since the last alert
+        # (basis moved) -> this is a NEW silence episode, alert from scratch
+        if basis is not None and prev_basis is not None and basis != prev_basis:
+            prev = None
         if prev is None or m >= prev + threshold_min:
             to_alert.append((name, sid, phase, m))
-            wd_state[name] = {"last_alert_silence_min": m,
-                              "last_alert_ts": now.strftime(
-                                  "%Y-%m-%d %H:%M:%S")}
+            wd_state[sid] = {"last_alert_silence_min": m,
+                             "basis": basis,
+                             "last_alert_ts": now.strftime(
+                                 "%Y-%m-%d %H:%M:%S")}
 
     if not to_alert:
         continue  # all suppressed by dedup -> stay completely silent

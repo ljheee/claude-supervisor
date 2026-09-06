@@ -311,6 +311,44 @@ if [ ! -f "$P3/.supervisor/$SID_B/interrupts.jsonl" ]; then
 if [ ! -f "$P3/.supervisor/interrupts.jsonl" ]; then
   pass "case12 no flat write"; else fail "case12 flat written"; fi
 
+# ---------- case 12b: double-hit with DIFFERENT registered_at -> latest wins ----------
+# register supervisor-b's live session first (pass-1 needs it to deliver)
+SUPB_SOCK="$TMP/supb.sock"
+python3 - "$TMP/sessions" "$SUPB_SOCK" "$SID_B" "$P3" <<'EOF'
+import json, sys
+d, sock, sid, proj = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+json.dump({"pid": 66666, "sessionId": sid, "cwd": proj,
+           "messagingSocketPath": sock, "name": "supervisor-b",
+           "updatedAt": 9999999999999,
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/66666.json", "w"))
+json.dump({"peerToken": "token-b",
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/66666.xyz.key", "w"))
+EOF
+# worker w-sid-late registered in shard A (older) AND shard B (newer):
+# interrupt must go to shard B (the latest registration), never A.
+addworker "$P3/.supervisor/$SID_A/state.json" "w-sid-late" "2026-09-04T10:00:00"
+addworker "$P3/.supervisor/$SID_B/state.json" "w-sid-late" "2026-09-04T12:00:00"
+start_server "$SUPB_SOCK" "$TMP/recv12b.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-late","cwd":"'"$P3"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case12b delivered to shard B (latest registered_at)" "$TMP/recv12b.txt" 'WORKER INTERRUPTED'
+if [ -f "$P3/.supervisor/$SID_A/interrupts.jsonl" ]; then
+  assert_not_contains "case12b shard A (older) not written" "$P3/.supervisor/$SID_A/interrupts.jsonl" "w-sid-late"
+else
+  pass "case12b shard A not written at all"
+fi
+# clean the late worker out of shard A to keep later cases' baseline intact
+python3 - "$P3/.supervisor/$SID_A/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]
+st = json.load(open(p))
+st["workers"] = [w for w in st.get("workers", []) if w.get("session_id") != "w-sid-late"]
+json.dump(st, open(p, "w"))
+EOF
+rm -f "$P3/.supervisor/$SID_B/interrupts.jsonl"
+
 # ---------- case 13: no shard match + double-hit ambiguity ----------
 N13=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
 fire_hook '{"hook_event_name":"StopFailure","session_id":"stranger-sid","cwd":"'"$P3"'","error":"429"}'

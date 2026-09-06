@@ -207,8 +207,8 @@
 
 ### DoD
 
-- [x] 全量回归全绿（存量 + 新增用例）
-- [x] 双 supervisor 冒烟四步证据齐全（路由/隔离/双 cron/注销）
+- [x] 全量回归全绿（存量 + 新增用例；实施后 CR2 再扩：65/32/29 三套断言全绿）
+- [x] 双 supervisor 冒烟证据齐全（隔离/两阶段注册/分片互不污染/注销/并发竞态真机走通；注：worker 双向注册路由与双方 CronList 各见未完整演练，挂账——原勾选表述夸大，实施后 CR2 修正）
 - [x] worktree 投递实测通过
 - [x] spec §6 五项勾验；挂账清单（预期至少三条：双 supervisor 真实项目长跑（含分支隔离下真实并行）/ stale 双条件判定与死条目用户裁决路径的协议级演练（无法脚本化）/ hook 错投零事故的长尾观察）
 
@@ -221,6 +221,18 @@
 - **Nit（不修）**：注入器 source 为空串时输出行尾随空格，纯外观。
 
 回归：stopfailure 64 断言 + watchdog 30 断言双 ALL PASS；install.sh 沙箱真跑两路径（正常 rc=0 三 hook 注册 / hooks 段损坏 rc=1 清晰报错中止）。
+
+### subagent 双盲 CR（第二轮，两路并行独立评审 + 作者复核）
+
+两路 subagent（代码正确性 / 协议文档一致性）独立审查 3396714..377e331 及 080a8db，发现高度交叉（registry.py 三项 P1 双方独立实锤），作者逐条复核后全部落地：
+
+**P1×3（全在 registry.py 注册事务，均已修+回归沉淀）**：① 全新项目首次 register 必崩——`acquire_lock` 对不存在的 `.supervisor/` 做 O_CREAT 抛 FileNotFoundError，exit 1 不在协议分诊表内（core 步骤 4 注册先于步骤 5 分片目录随建，绿地首启必触发；沙箱复现）。修：makedirs 父目录。② 两阶段确认契约断裂——exit-2 输出只打印 8 位截断 sid，重试却要求完整 UUID JSON 数组，按文档字面重试永远 grown ABORT 死循环（dev-6 冒烟"走通"实为 LLM 偏离字面自行取全量 sid）。修：输出末尾追加机器可读 `KNOWN_OTHERS ["<完整sid>", ...]` 行（grown 分支同样重印），core/spec 同步。③ 安装为 644 不可执行而 core 写裸路径调用——rc=126 不在分诊表。修：install.sh `install -m 755`。
+
+**P2×6（均修）**：shard-guard 路径解析四路绕过（`//`、`./`、`..` 穿越实为逃出保护区放行正确、单 `..` 进他人分片、macOS 大小写变体）→ normpath + 全程大小写不敏感比对，四路实测封死；registry.py 按 CWD 而非 --project-dir 定位 → 全子命令补 `--project-dir`；heartbeat 重建可造无名撞名活跃条目（复现两个 active "supervisor"）→ 无 --name exit 1、撞活跃名 exit 3；worker.md 发现缺 worktree 兜底而 v3 旗舰场景恰是 worktree 隔离 → 补 git-common-dir 条款；hook 向上寻址命中无关 `.supervisor` 时遮蔽 worktree 真账本 → 零命中后追加 git 候选；watchdog 去重按 worker name 键控且恢复后梯度不重置（v2 遗留）→ 键改 session_id + basis 快照（worker 时间戳变更即重置梯度）。
+
+**P3/Nit（文档类全修，代码 Nit 不修）**：README FAQ 残留平铺路径、DESIGN §3.1 旧身份模型（ListAgents 解析/name 仅展示）与 v3 双键矛盾、DESIGN §9.12 与 spec F1 谎称"dev-6 含双 project-dir 实测"（实际挂账）、plan dev-6 DoD 勾选夸大（四步 vs 实际 worker 路由未演练）、断言计数漂移、spec lockfile 名/子命令数、README 文件清单漏 rework spec、版本门槛两处不一（统一 2.1.259）、DESIGN 行数基数 115→119、install cron 示例引号；注入器尾随空格维持不修。
+
+**测试沉淀**：新建 `test_registry.sh` 29 断言（exit 契约/两阶段 KNOWN_OTHERS/撞名/幂等/heartbeat 重建拒绝/并发 6 进程零脏写/损坏重置）；stopfailure 增 case12b（双命中 latest-wins 定向投递）→ 65 断言；watchdog case C 改实断言 + 增 case O（升级再触发）/P（恢复重置）→ 32 断言。三套全 ALL PASS；install.sh 沙箱验证 755 裸路径可执行。
 
 ---
 

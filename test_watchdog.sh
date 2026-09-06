@@ -126,8 +126,18 @@ N2=$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)
 assert_eq "B: no duplicate alert at same silence level" "$N1" "$N2"
 
 # ---- case C: instruction_ts newer than report_ts must NOT suppress alert ----
-# (already covered by case A: instruction ts is NEW but alert fired anyway)
-pass "C: last_instruction_ts ignored (case A proved it)"
+# independent assertion: report old (overdue), instruction BRAND NEW, no
+# prior response -> must still alert (a supervisor STATUS CHECK never
+# resets the silence clock)
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"w-c","session_id":"sid-w-c","phase":"dev-1",
+   "registered_at":"$OLD","last_report_ts":"$OLD","last_instruction_ts":"$NEW"}],
+ "reviews":[],"done":false}
+EOF
+run_wd 60
+assert_contains "C: fresh instruction_ts does not reset silence" "$SPOOL" "WATCHDOG ALERT"
 
 # ---- case D: fresh worker -> no alert ----
 write_state <<EOF
@@ -199,6 +209,48 @@ write_state <<EOF
 EOF
 run_wd 60
 assert_contains "K: RFC3339 Z timestamp parsed -> alert" "$SPOOL" "sid-w3"
+
+# ---- case O: escalation ladder re-alerts when silence grew another T ----
+# seeded: last alert at silence 70min, basis == current basis (worker ts
+# unchanged since) -> no ladder reset; silence now 120 >= 70+50 -> re-alert
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+OLD70=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=120)).isoformat())")
+python3 - "$PROJ/.supervisor/watchdog_state.json" "$OLD70" <<'EOF'
+import json, sys
+path, basis = sys.argv[1], sys.argv[2]
+json.dump({"sid-w-o": {"last_alert_silence_min": 70, "basis": basis,
+                       "last_alert_ts": "x"}}, open(path, "w"))
+EOF
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"w-o","session_id":"sid-w-o","phase":"dev-2",
+   "registered_at":"$OLD","last_report_ts":"$OLD"}],
+ "reviews":[],"done":false}
+EOF
+run_wd 50
+assert_contains "O: escalation re-alert at m>=prev+T (same basis)" "$SPOOL" "WATCHDOG ALERT"
+
+# ---- case P: worker RECOVERED (basis moved) -> ladder resets ----
+# seeded: last alert at silence 120min against the old basis; worker then
+# reported (basis moved to now-70min). New silence 70min < prev(120)+T,
+# yet this is a NEW episode -> must alert from scratch (threshold 60)
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+BASIS_OLD=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=150)).isoformat())")
+BASIS_NEW=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=70)).isoformat())")
+python3 - "$PROJ/.supervisor/watchdog_state.json" "$BASIS_OLD" <<'EOF'
+import json, sys
+path, basis = sys.argv[1], sys.argv[2]
+json.dump({"sid-w-p": {"last_alert_silence_min": 120, "basis": basis,
+                       "last_alert_ts": "x"}}, open(path, "w"))
+EOF
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"w-p","session_id":"sid-w-p","phase":"dev-2",
+   "registered_at":"$BASIS_NEW","last_report_ts":"$BASIS_NEW"}],
+ "reviews":[],"done":false}
+EOF
+run_wd 60
+assert_contains "P: recovery (basis moved) resets the ladder -> alert" "$SPOOL" "WATCHDOG ALERT"
 
 # ---- v3 shard layout ----
 SID_A="11111111-1111-1111-1111-111111111111"

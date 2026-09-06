@@ -227,19 +227,9 @@ def load_flat(sup_dir):
     return None
 
 
-def resolve_ledger(cwd, session_id):
-    """Select the ledger this interrupt belongs to.
-
-    Returns (state_dict, ledger_dir, n_shards) or None. ledger_dir is the
-    shard dir for shard flow, or the .supervisor dir itself for flat flow
-    (both legacy-only and the shard-coexistence fallback channel).
-    """
-    sup_dir = find_supervisor_root(cwd)
-    if not sup_dir:
-        sup_dir = find_via_git(cwd)
-    if not sup_dir:
-        return None  # not inside a supervised project
-
+def _resolve_in(sup_dir, session_id):
+    """Try to resolve the ledger inside one candidate .supervisor dir.
+    Returns (state_dict, ledger_dir, n_shards) or None."""
     shards = load_shards(sup_dir)
 
     if not shards:
@@ -285,11 +275,39 @@ def resolve_ledger(cwd, session_id):
     return None
 
 
+def resolve_ledger(cwd, session_id):
+    """Select the ledger this interrupt belongs to.
+
+    Returns (state_dict, ledger_dir, n_shards) or None. ledger_dir is the
+    shard dir for shard flow, or the .supervisor dir itself for flat flow
+    (both legacy-only and the shard-coexistence fallback channel).
+
+    Candidate order: nearest ancestor .supervisor first; only when that
+    yields NOTHING for this session do we try the git-common-dir main
+    worktree -- a worktree nested under a foreign supervised project
+    would otherwise have its real ledger shadowed by the foreign
+    ancestor's .supervisor (CR2).
+    """
+    up = find_supervisor_root(cwd)
+    if up is None:
+        git = find_via_git(cwd)
+        if git is None:
+            return None  # not inside a supervised project
+        return _resolve_in(git, session_id)
+    r = _resolve_in(up, session_id)
+    if r is not None:
+        return r
+    git = find_via_git(cwd)
+    if git is not None and os.path.abspath(git) != os.path.abspath(up):
+        return _resolve_in(git, session_id)
+    return None
+
+
 def resolve_supervisor(sessions, st, n_shards=0):
     """Resolve the supervisor session. Session-id match first, then
     name+cwd==project_dir. Never name-only (P1-2). Pass-2 is disabled
-    when more than one shard exists: a dead target must not fall through
-    to a same-name stranger in the same directory."""
+    once ANY shard exists (>=1): a dead target must not fall through to
+    a same-name stranger in the same directory."""
     proj = st.get("project_dir")
     want_sid = st.get("supervisor_session_id")
     want_name = st.get("supervisor_name") or "supervisor"

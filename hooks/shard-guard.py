@@ -18,8 +18,12 @@ Everything else is allowed, including archive/ dirs and the legacy flat
 state.json (they simply don't match the .supervisor/<uuid>/ pattern).
 
 Cheap short-circuit: the raw stdin text is checked for the substring
-".supervisor/" BEFORE any JSON parsing - the overwhelmingly common case
-(an ordinary business file write) pays one string check, zero parsing.
+".supervisor/" (case-insensitively -- macOS default APFS is case-
+insensitive, so .Supervisor/ is the same directory) BEFORE any JSON
+parsing - the overwhelmingly common case (an ordinary business file
+write) pays one lowercased string check, zero parsing. file_path is
+normpath()-ed before head-token extraction so //, ./ and .. cannot
+smuggle a protected target past the check.
 This guard is a tripwire, not a wall: Bash can still write anywhere, and
 that is covered by the protocol's own red lines.
 
@@ -30,6 +34,7 @@ Settings registration (done by install.sh, user-level):
   hooks.PreToolUse (matcher "Write|Edit") -> python3 <this file>
 """
 import json
+import os
 import re
 import sys
 
@@ -47,7 +52,9 @@ def main():
     raw = sys.stdin.read()
 
     # cheap short-circuit: nothing supervisor-related in the payload at all
-    if ".supervisor/" not in raw:
+    # (case-insensitive: APFS-default volumes treat .Supervisor/ as the
+    # same directory)
+    if ".supervisor/" not in raw.lower():
         return
 
     try:
@@ -61,15 +68,19 @@ def main():
     if not isinstance(ti, dict):
         return
     fp = ti.get("file_path")
-    if not isinstance(fp, str) or not fp or ".supervisor/" not in fp:
+    if not isinstance(fp, str) or not fp or ".supervisor/" not in fp.lower():
         return
 
-    # path relative to the .supervisor/ root
-    rest = fp[fp.find(".supervisor/") + len(".supervisor/"):]
+    # normalize before extracting the head token: collapse //, ./ and ..
+    # so ".supervisor//registry.json" or ".supervisor/<own>/../../<other>/"
+    # cannot smuggle a protected target past the check (CR2)
+    fp = os.path.normpath(fp)
+    idx = fp.lower().find(".supervisor/")
+    rest = fp[idx + len(".supervisor/"):]
     head = rest.split("/")[0]
 
     # rule 2: registry.json direct write -> always denied
-    if head == "registry.json":
+    if head.lower() == "registry.json":
         deny(".supervisor/registry.json 是多写者核心文件（fcntl 并发锁在"
              " ~/.agent-mail/registry.py 内）——Write/Edit 直编会击穿并发安全。"
              "合法写操作一律经 registry.py 子命令（Bash 调用）。")
@@ -79,7 +90,7 @@ def main():
         sid = data.get("session_id")
         if not isinstance(sid, str):
             sid = ""
-        if sid == head:
+        if sid.lower() == head.lower():
             return  # own shard
         deny("写错分片——目标 .supervisor/%s/ 属于 session_id=%s 的"
              " supervisor，与你的 session_id=%s 不符。若你就是该 supervisor："

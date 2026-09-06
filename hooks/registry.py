@@ -17,10 +17,15 @@ Protocol contract (spec F1):
                   OTHER active entries has not GROWN, then writes.
                 Upsert refreshes name and clears the entry's own stale
                 flag (resume self-heals).
-  - heartbeat : touch heartbeat_ts on own entry only (creates it if
-                missing, with the provided name -- recovery convenience).
+  - heartbeat : touch heartbeat_ts on own entry only. Entry missing and
+                no --name -> exit 1 (re-register instead); with --name it
+                recreates the entry, refusing active name collisions (3).
   - unregister: delete own entry only. Never touches anyone else's.
   - mark-stale: set stale=true on a given session_id (never deletes).
+  - list      : read-only dump.
+
+The registry lives at <project-dir>/.supervisor/registry.json; every
+subcommand accepts --project-dir (default: CWD) to locate it.
 
 All writes are tmp-file + os.replace atomic. Exit codes:
   0 success / 2 isolation confirmation needed / 3 name collision /
@@ -49,6 +54,12 @@ def die(code, msg):
 
 def acquire_lock(registry_path):
     lock_path = registry_path + ".lock"
+    # first-ever run: .supervisor/ may not exist yet (core protocol runs
+    # register before creating the shard dir) -- create it or O_CREAT below
+    # raises FileNotFoundError with a traceback outside the exit contract
+    parent = os.path.dirname(registry_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     deadline = time.monotonic() + LOCK_TIMEOUT
     while True:
@@ -111,9 +122,20 @@ def active_others(supervisors, my_sid):
 
 
 def entry_line(s):
+    sid = s.get("session_id")
+    sid = sid if isinstance(sid, str) else ""
     return ("  - %s  sid=%s  mode=%s  branch=%s  goal=%s" % (
-        s.get("name"), (s.get("session_id") or "")[:8],
+        s.get("name"), sid[:8],
         s.get("mode"), s.get("branch"), s.get("goal_brief")))
+
+
+def known_others_line(others):
+    """Machine-readable full session_id array for --known-others retry.
+    The human entry_line truncates sids to 8 chars; the two-phase contract
+    requires the FULL uuid on retry, so this line is the copy source."""
+    sids = [s.get("session_id") for s in others
+            if isinstance(s.get("session_id"), str)]
+    return "KNOWN_OTHERS %s" % json.dumps(sids)
 
 
 def read_registry(registry_path):
@@ -152,8 +174,10 @@ def cmd_register(args, registry_path):
             print("ACTIVE SUPERVISORS in this project:")
             for s in others:
                 print(entry_line(s))
-            print("Re-run with --isolation-confirmed after the user has "
-                  "confirmed branch/worktree isolation.")
+            print(known_others_line(others))
+            print("Re-run with --isolation-confirmed --known-others '<the "
+                  "KNOWN_OTHERS array above>' after the user has confirmed "
+                  "branch/worktree isolation.")
             return "need-confirm"
         if confirmed:
             # verify the other-active set has not GROWN since first attempt
@@ -169,6 +193,7 @@ def cmd_register(args, registry_path):
                       "confirmation:")
                 for s in grown:
                     print(entry_line(s))
+                print(known_others_line(others))
                 return "grown"
         # idempotent upsert keyed by sid: field-level merge (unspecified
         # args keep their existing values; name/stale/heartbeat refresh)
@@ -228,10 +253,19 @@ def cmd_heartbeat(args, registry_path):
                 s["heartbeat_ts"] = now_iso()
                 s["stale"] = False
                 return "ok"
-        # convenience: entry vanished (crash cleanup) -> recreate minimal
+        # convenience: entry vanished (crash cleanup) -> recreate ONLY with
+        # an explicit --name, and never colliding with another ACTIVE entry
+        # (name uniqueness is the SendMessage routing hard-precondition; a
+        # silent nameless rebuild could break it -- CR2)
+        if not args.name:
+            return "missing"
+        for s in supervisors:
+            if isinstance(s, dict) and not s.get("stale") \
+                    and s.get("name") == args.name:
+                return "collision"
         supervisors.append({
             "session_id": args.session_id,
-            "name": args.name or "supervisor",
+            "name": args.name,
             "mode": "", "goal_brief": "", "project_dir": "",
             "branch": "",
             "started_at": now_iso(),
@@ -239,7 +273,14 @@ def cmd_heartbeat(args, registry_path):
             "stale": False,
         })
         return "ok"
-    write_txn(registry_path, txn)
+    r = write_txn(registry_path, txn)
+    if r == "missing":
+        die(1, "no registry entry for sid %s and no --name given; re-run "
+               "the register step (idempotent upsert) to recreate it"
+            % args.session_id)
+    if r == "collision":
+        die(3, "an ACTIVE supervisor already uses name '%s'; /rename to a "
+              "unique name and re-register" % args.name)
     print("heartbeat ok")
 
 
@@ -304,21 +345,34 @@ def main():
     pr.add_argument("--isolation-confirmed", action="store_true")
     pr.add_argument("--known-others",
                     help="JSON array of other active session_ids, from the "
-                         "first attempt's exit-2 output")
+                         "KNOWN_OTHERS line of the first attempt's exit-2 "
+                         "output")
 
     ph = sub.add_parser("heartbeat")
     ph.add_argument("--session-id", required=True)
     ph.add_argument("--name")
+    ph.add_argument("--project-dir")
 
     pu = sub.add_parser("unregister")
     pu.add_argument("--session-id", required=True)
+    pu.add_argument("--project-dir")
 
     ps = sub.add_parser("mark-stale")
     ps.add_argument("--session-id", required=True)
+    ps.add_argument("--project-dir")
 
-    sub.add_parser("list")
+    pl = sub.add_parser("list")
+    pl.add_argument("--project-dir")
 
     args = p.parse_args()
+    # registry location: explicit --project-dir wins (spec F1 defines the
+    # registry under <project-dir>/.supervisor/; resolving by CWD alone
+    # would split registry and shards across dirs when they differ -- CR2)
+    pd = getattr(args, "project_dir", None)
+    if pd:
+        default_registry = os.path.join(pd, ".supervisor", "registry.json")
+    elif not os.environ.get("CLAUDE_SUPERVISOR_DIR"):
+        default_registry = ".supervisor/registry.json"
     registry_path = os.path.abspath(default_registry)
 
     if args.cmd == "register":

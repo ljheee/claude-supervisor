@@ -108,7 +108,7 @@ InstructionsLoaded, CwdChanged, FileChanged, DirectoryAdded, MessageDisplay
 
 ### 3.1 身份模型（session_id 主键）
 
-worker 与 supervisor 的身份主键一律是 **session_id**（注册时由 supervisor 通过 ListAgents 从发送方解析获得），name 仅作展示：
+worker 与 supervisor 的身份主键一律是 **session_id**（获取方式 v3 有变，见第 13 节：supervisor sid 首选 SessionStart 注入行，worker 注册时自报 sid 供交叉验证；name 也不再仅作展示，而是 SendMessage 的消息路由键——只认名称、必须唯一）：
 
 - StopFailure hook 的准入判定是"stdin 的 session_id ∈ workers[].session_id"——名字重复、改名、同目录的用户会话、空账本都不会误报（P1-1/P1-3 修复）。
 - hook 寻址 supervisor：先 `supervisor_session_id` 精确匹配；id 失配再退到 `supervisor_name` + 会话 cwd == `project_dir` 双重校验——跨项目的同名 supervisor 会话不会被选中（P1-2 修复）。
@@ -255,15 +255,16 @@ supervisor 收到 WORKER INTERRUPTED 后：
 9. **v2 端到端实测记录（2026-09-05，真实双会话演练）**：① notify_when_idle 订阅——✅ 实测通过：SendMessage 自动附带订阅（worker 侧可见 UDS 地址级订阅请求），worker idle 后 supervisor 正常感知，唤醒消息再次自动附带新订阅；② WORKER INTERRUPTED 注入 + ScheduleWakeup 退避——✅ 实测通过：UDS 注入送达、四步流程（incidents→acknowledged→pending_check→arm）完整执行且顺序正确、60s 后唤醒 fire、唤醒消息送达 worker；③ SendMessage 唤醒空闲/中断 worker——✅ 实测通过：worker 收到唤醒消息立即开新回合（ack + 继续干活 + spec 上报），链条⑥打通，429 中断全自动闭环成立（StopFailure 终态的极端情形仍未实测，但空闲唤醒已证 SendMessage 可驱动停止的会话）。**实测意外收获**：(a) supervisor 对伪造中断的防御超出预期——worker_session_id 不在账本时拒绝处理并升级用户，且正确识别"peer 消息不能冒充用户授权"，两次社会工程尝试均被拒绝；(b) 发现并修复 session_id 格式坑：ListAgents 输出 `This session is supervisor [6aebfc]` 的方括号短哈希不是 session_id（真实值为 36 位 UUID），协议已补 UUID 格式自检条款。
 10. **StopFailure 终态唤醒（残留挂账）**：③的实测覆盖的是"idle worker"而非"StopFailure 终态 worker"——真实 429 后会话是否等价于可被 SendMessage 驱动的状态，仍需真实 429 事件验证（无法伪造，等首次实战）。
 11. **同分支混行并行不支持（v3）**：多 supervisor 同仓并行强制分支/worktree 隔离，同分支混行提交的范围比对、回滚锚点无法归因——并行即隔离，不做智能合并；未获隔离承诺的并行在注册事务处被拦（ESCALATE 用户裁决分支）。
-12. **跨项目同名 supervisor 边界（v3，dev-0 实测推论）**：SendMessage 只认会话名且无 cwd 消歧——两个不同项目里各有一个叫 supervisor 的监工时，worker/监工按名寻址理论上可能投错项目；对冲是命名建议含项目后缀（supervisor-<proj>-gf）。另：跨项目同名 + 心跳停更会让活着的监工被 stale 误判（heartbeat 双条件兼作兑子，resume upsert 自愈）。dev-6 冒烟含双 project-dir 同名实测。另 dev-6 已实测定案：`<名>[<短ID>]` 消歧形式 SendMessage 不可达（返回 No agent named，did-you-mean 提示剥后缀）——worker.md 已据此收紧为"同名多条请用户先 rename"；idle 存活会话在 ListAgents 可见（sup 冒烟会话实测，ps 佐证进程存活），stale 判定按 name 查可达的语义成立。
+12. **跨项目同名 supervisor 边界（v3，dev-0 实测推论）**：SendMessage 只认会话名且无 cwd 消歧——两个不同项目里各有一个叫 supervisor 的监工时，worker/监工按名寻址理论上可能投错项目；对冲是命名建议含项目后缀（supervisor-<proj>-gf）。另：跨项目同名 + 心跳停更会让活着的监工被 stale 误判（heartbeat 双条件兼作兑子，resume upsert 自愈）。dev-6 冒烟未含双 project-dir 同名实测（挂账，见 plan 未做项）。另 dev-6 已实测定案：`<名>[<短ID>]` 消歧形式 SendMessage 不可达（返回 No agent named，did-you-mean 提示剥后缀）——worker.md 已据此收紧为“同名多条请用户先 rename”；idle 存活会话在 ListAgents 可见（sup 冒烟会话实测，ps 佐证进程存活），stale 判定按 name 查可达的语义成立。
 
 
 ## 10. 测试策略
 
-`test_stopfailure.sh`（64 项断言）与 `test_watchdog.sh`（30 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端/假 agent-mail CLI），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
+`test_stopfailure.sh`（65 项断言）、`test_watchdog.sh`（32 项断言）与 `test_registry.sh`（29 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端；registry 测试经 CLAUDE_SUPERVISOR_DIR 环境变量钉到临时目录），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
 
 - hook：正常投递（auth+user 帧、kind 分类、phase、session_id 落账）、陌生人会话/空 workers/done 项目/无 state 目录的零误伤、子目录 cwd 向上寻址、socket 存在但拒连（真 connect 失败分支）、key 缺失的 auth 降级、畸形 stdin、非字符串 error_details、同名 supervisor 诱饵不被选中；v3 增量：多分片定向投递/零命中与双命中歧义不投递、平铺回退与升级窗口（case18b：1 分片 + v2 平铺共存时 pass-2 禁用不错投）、worktree 发现、archive 不可见、分片守卫（拦 registry 直写/错 sid deny/短路放行）、身份注入器（startup/resume/垃圾静默）；
-- watchdog：逾期告警（含 session_id）、同静默级别去重、`last_instruction_ts` 不抑制告警、新鲜 worker/最近响应/done 项目静默、非法阈值/目录/损坏 state/workers 非列表的静默退出、梯度升级、RFC3339 Z 时间戳解析；v3 增量：分片遍历与平铺回退、多分片独立告警与去重互不干扰、UDS 直投按 supervisor_session_id 定向、archive 不可见。
+- watchdog：逾期告警（含 session_id）、同静默级别去重、`last_instruction_ts` 不抑制告警（case C 独立断言）、新鲜 worker/最近响应/done 项目静默、非法阈值/目录/损坏 state/workers 非列表的静默退出、梯度升级再触发（case O）、恢复后梯度重置（case P：basis 快照变更即新静默周期）、RFC3339 Z 时间戳解析；v3 增量：分片遍历与平铺回退、多分片独立告警与去重互不干扰、UDS 直投按 supervisor_session_id 定向、archive 不可见；
+- registry：全新项目首启（目录自建）、两阶段隔离事务（KNOWN_OTHERS 完整 sid 行、前缀不可满足 grown 校验）、撞名 exit 3、幂等 upsert、heartbeat 缺失条目拒绝无名重建/撞名重建、mark-stale/unregister 存在性与幂等、--project-dir 异位定位、损坏 registry 重置、6 并发注册零脏写。
 
 测试数据的一个教训值得记录：给本地 naive 时间戳硬加 `Z` 后缀会把它变成"未来时间"（UTC 解析比本地墙钟早 8 小时），导致静默值为负、永不告警——测试用例 K 用真正的 UTC 过去时间戳单独覆盖 Z 解析路径。
 
@@ -327,7 +328,7 @@ state.json 可选顶层字段，生命周期：archaeology 产出初稿 → safe
 
 ### 12.6 注入体积预算
 
-协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行（实施 CR 后实测）、core 169 行（拆分时实测）。拼接产物：绿地 208 行（原 197，增量全在模式声明节）、rework 237 行（实施 CR P1-1 内联化后）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。v3 增量实测：core 169→173 行（+4，含分片路径换根、注册事务、cron 标识、worker 自报 sid 条款），worker 115→124 行（+5，registry 四分支发现 + 三选项死条目处置 + 自报 sid 行）；均在零回归 diff 门禁的八类允许项内逐条归类（见 specs/2026-09-06-multi-supervisor/plan.md 附录 A）。
+协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行（实施 CR 后实测）、core 169 行（拆分时实测）。拼接产物：绿地 208 行（原 197，增量全在模式声明节）、rework 237 行（实施 CR P1-1 内联化后）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。v3 增量实测：core 169→173 行（+4，含分片路径换根、注册事务、cron 标识、worker 自报 sid 条款），worker 119→124 行（+5，registry 四分支发现 + worktree 兑底 + 三选项死条目处置 + 自报 sid 行）；均在零回归 diff 门禁的八类允许项内逐条归类（见 specs/2026-09-06-multi-supervisor/plan.md 附录 A）。
 
 ## 13. 多 Supervisor 并存（v3）
 

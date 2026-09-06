@@ -28,7 +28,7 @@ Phase: <当前 phase>
 
 ## 注册步骤（立即执行）
 
-1. **发现监工**：从当前目录向上找最近一个含 `.supervisor/` 的祖先目录（子目录里启动也能发现；与 hook 的向上寻址语义一致），读该 `.supervisor/registry.json`（只读；文件不存在或无活跃条目时视为无）。四分支：
+1. **发现监工**：从当前目录向上找最近一个含 `.supervisor/` 的祖先目录（子目录里启动也能发现；与 hook 的向上寻址语义一致）。向上找不到且在 git 仓库内（linked worktree 场景）→ 执行 `git rev-parse --git-common-dir`，其父目录即主工作区根，再到 `<主工作区根>/.supervisor/` 找 registry.json（与 hook 的 worktree 兜底语义一致）。读 `.supervisor/registry.json`（只读；文件不存在或无活跃条目时视为无）。四分支：
    - **唯一活跃（非 stale）条目** → 直接以该条目的 name 为监工目标（SendMessage 只认会话名称，dev-0 实测 UUID/短 ID 均不可达）。
    - **多个活跃条目** → 把列表（name / mode / goal 摘要 / branch）展示给用户，请用户指定监工名，等待用户输入。
    - **无活跃条目 / registry 不存在** → 若用户在参数里给了 `--supervisor <会话名>`（会话名称，SendMessage 唯一可用寻址键，必须唯一；同名多条时请用户先让监工 `/rename` 唯一名后重试——`<名>[<短ID>]` 消歧形式 dev-6 实测不可达，勿用），用 `ListAgents` 按名字找到它；仍找不到 → 提示监工未启动（可提示用户在监工终端 `/rename supervisor-<后缀>` 固定名字后重试），停止等待用户输入。

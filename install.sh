@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Install claude-supervisor slash commands for Claude Code (requires v2.1.224+ for
-# cross-session messaging: ListAgents + SendMessage; StopFailure hook needs
-# 2.1.259+ -- no official API to detect this, verify with `claude --version`).
+# Install claude-supervisor slash commands for Claude Code (requires
+# v2.1.259+ for cross-session messaging AND the StopFailure/SessionStart/
+# PreToolUse hooks used by v3 -- no official API to detect this, verify
+# with `claude --version`).
 #
 #   /supervisor  - initialize the current session as the greenfield-mode supervisor
 #   /rework      - initialize the current session as the rework/refactor supervisor
@@ -129,7 +130,14 @@ fi
 install -m 755 "$SRC/watchdog.sh" "$MAIL_HOME/supervisor-watchdog"
 
 echo "==> Installing registry.py to $MAIL_HOME/registry.py"
-install_backup "$SRC/hooks/registry.py" "$MAIL_HOME/registry.py"
+if [ -f "$MAIL_HOME/registry.py" ] && \
+   ! cmp -s "$SRC/hooks/registry.py" "$MAIL_HOME/registry.py"; then
+  cp "$MAIL_HOME/registry.py" "$MAIL_HOME/registry.py.bak-${STAMP}"
+  echo "  backed up existing registry.py"
+fi
+# 755: core protocol invokes it as a bare executable path
+# (~/.agent-mail/registry.py register ...)
+install -m 755 "$SRC/hooks/registry.py" "$MAIL_HOME/registry.py"
 
 echo "==> Installing hooks to $HOOK_DIR"
 mkdir -p "$HOOK_DIR"
@@ -272,11 +280,11 @@ echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查�
 echo "多 supervisor 并存（v3）：同一项目可同时跑多个监工（如 /supervisor 开新模块 + /rework 改存量），"
 echo "各用唯一会话名（建议 /rename supervisor-gf / supervisor-rw，含项目后缀更稳）+ 各自分支/worktree 隔离；"
 echo "账本按 session_id 分片互不污染，worker 启动时从 .supervisor/registry.json 自选监工。"
-echo "依赖: Claude Code >= 2.1.224（ListAgents + SendMessage；StopFailure hook 需 >= 2.1.259，"
-echo "      官方无检测接口，请自行 claude --version 确认）"
+echo "依赖: Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure/SessionStart/PreToolUse"
+echo "      hooks；官方无检测接口，请自行 claude --version 确认）"
 echo ""
 echo "中断防御（可选）: cron 定时跑 watchdog，worker 失联时投递告警（路径含空格请加引号）："
-echo "  */10 * * * * $MAIL_HOME/supervisor-watchdog '/path/to/repo' 60"
+echo "  */10 * * * * \"$HOME/.agent-mail/supervisor-watchdog\" '/path/to/repo' 60"
 echo ""
 echo "中断防御（已自动安装）: StopFailure hook——worker 回合因 429/网络/API 错误被掐断时，"
 echo "自动向 supervisor 的 UDS 通道直投 WORKER INTERRUPTED，并落盘 .supervisor/<sid>/interrupts.jsonl"
