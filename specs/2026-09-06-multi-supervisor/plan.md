@@ -212,6 +212,16 @@
 - [x] worktree 投递实测通过
 - [x] spec §6 五项勾验；挂账清单（预期至少三条：双 supervisor 真实项目长跑（含分支隔离下真实并行）/ stale 双条件判定与死条目用户裁决路径的协议级演练（无法脚本化）/ hook 错投零事故的长尾观察）
 
+### 实施后 CR（080a8db）
+
+对 3396714..377e331 全部实施 commit 做作者 CR，落点：
+
+- **P2（已修）**：`resolve_supervisor` pass-2 禁用阈值原写 `n_shards > 1`，漏掉 v2→v3 升级窗口（平铺 v2 账本 + 恰好 1 个 v3 分片共存）——v2 supervisor 已死、同名 v3 supervisor 存活时 v2 worker 中断会错投。改为 `n_shards >= 1`（纯 v2 零分片保留 pass-2），新增回归用例 case18b（单分片 + 平铺共存 + 死 v2 sid + 同名活 v3 诱饵 → 不投递、落平铺账本 delivered=false），spec F4 同步修正记录。
+- **P3（已修）**：README 断言数 58→64（含 18b 增量）；DESIGN §10 测试计数从 v2 的 22/15 更正为 64/30 并补 v3 覆盖矩阵两行；install.sh 补 `hooks` 段非 dict 的清晰报错中止（原为裸 AttributeError traceback，写入前即崩不破坏安全，仅报错不可读）；worker.md 步骤 1 发现改为「向上找最近含 `.supervisor/` 的祖先目录」（子目录启动盲区，与 hook 向上寻址语义对齐）。
+- **Nit（不修）**：注入器 source 为空串时输出行尾随空格，纯外观。
+
+回归：stopfailure 64 断言 + watchdog 30 断言双 ALL PASS；install.sh 沙箱真跑两路径（正常 rc=0 三 hook 注册 / hooks 段损坏 rc=1 清晰报错中止）。
+
 ---
 
 ## 明确不做清单
