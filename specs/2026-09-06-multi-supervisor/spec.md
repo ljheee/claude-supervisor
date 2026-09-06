@@ -49,7 +49,7 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 
 **发现层与存储层分离**：registry.json 是唯一多写者文件（registry.py 的 fcntl 事务串行化），分片目录严格单写者——把并发复杂度压缩到一个文件上。
 
-**发现与寻址职责拆分**：session_id 是机器路由键（SendMessage 寻址、hook/watchdog 定位），name/mode/goal 摘要是人类可读标签（列表展示用）。这是 v2"session_id 是身份主键、name 仅供展示"教训从 worker 侧推广到 supervisor 侧。
+**发现与寻址职责拆分（双键架构，dev-0 实测定案）**：**会话名称（name）是消息路由键**——SendMessage 只认名称（UUID 与短 ID 实测均不可达）；**session_id（UUID）是持久身份与存储键**——分片目录、hook stdin 匹配、watchdog UDS 直投都用它。两键都不可弃：名字是进程生命周期属性（resume 后会重分配，实测 test-98→test-34），sid 跨 resume 持久。因此 name 必须显式管理（/rename 固定唯一名），sid 必须可靠获取（`~/.claude/sessions/` 注册表，实测当前版本 ListAgents 不输出 UUID）。这是 v2"session_id 是身份主键、name 仅供展示"教训的实测级精化。
 
 **git 并行裁决（方案：物理隔离）**：多 supervisor 各自队伍在不同分支或 worktree 上工作（worker.md 已有"若 supervisor 为你指定了独立分支或 worktree"条款，v3 将其从可选升级为多 supervisor 时的强制）。范围比对、安全网基线、回滚锚点全部在各自分支语义下成立。同分支并行明确不支持（supervisor 启动时检测到 registry 有其他活跃 supervisor 且本方未获隔离承诺 → ESCALATE 用户先裁决分支）。
 
@@ -66,7 +66,8 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
      "stale": false}
   ]}
   ```
-- **写者与时机**：supervisor 启动步骤内注册（register）、每次巡检心跳（heartbeat）、全部 worker done 收尾时注销（unregister）。register 为**按 session_id 的幂等 upsert**（同 sid 覆盖刷新，含清除自身 stale 标记）——resume 归来的 supervisor 重走启动流程不产生重复条目。
+- **写者与时机**：supervisor 启动步骤内注册（register）、每次巡检心跳（heartbeat）、全部 worker done 收尾时注销（unregister）。register 为**按 session_id 的幂等 upsert**（同 sid 覆盖刷新——含更新 name 字段与清除自身 stale 标记）——resume 归来的 supervisor 重走启动流程不产生重复条目，且自动纠正 resume 导致的名字漂移。
+- **名称唯一性断言（消息路由的硬前提，dev-0 实测：SendMessage 只认名称）**：register 事务内校验本方 name 与他人活跃条目的 name 不冲突——冲突则拒绝注册，要求本方先 `/rename <唯一名>`（建议形态：supervisor-<模式或短后缀>，如 supervisor-gf / supervisor-rw）。名称唯一性是多 supervisor 并存的准入条件，不是建议。
 - **写入门禁（单次持锁事务）**：注册 = "读 registry → 检查他人活跃条目 → 写自己条目"的**单次持锁读-改-写事务**：无他人活跃条目则直接写入；有他人活跃条目则持锁读出列表，锁外完成用户隔离确认（分支/worktree 不冲突），确认后**重做一次带校验的注册事务**（重读确认他人条目未变再写入）。ESCALATE/用户叫停路径**不写入任何条目**（根除自造死条目）。branch 字段在隔离确认完成后随写入填入（时序上无矛盾）。
 - **并发写安全**：读-改-写整文件必须持进程内互斥锁（lockfile `.supervisor/registry.lock`）。**实现载体是 `registry.py` 助手脚本**（随 watchdog 同目录安装），提供 `register / heartbeat / unregister / mark-stale` 四个子命令，内部 python fcntl 持锁（超时 5 秒，失败 ESCALATE 用户）——协议条款只约束"调哪个命令"，不要求 LLM 现场构造持锁读-改-写命令（对照：state.json 原子写是单写者无锁纯 mv；install.sh 更新 settings.json 已有 python fcntl 先例）。
 - **stale 标记的写路径**：活性检查（ListAgents 可达性）由 supervisor LLM 判断，判定结果经 `registry.py mark-stale <sid>` 写入——**stale 标记也必须走 registry.py，禁止 LLM 直接编辑 registry.json**（否则击穿"并发写全部经锁"）。register 的幂等 upsert 含清除自身 stale 标记（resume 归来自息）。
@@ -77,9 +78,11 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 
 - 账本路径改为 `.supervisor/<本 supervisor session_id>/state.json`；`interrupts.jsonl`、`acknowledged.jsonl` 同目录随行（中断流水天然属于单个 supervisor）。
 - core 启动步骤改造：
+  - **会话名固定与 sid 获取（dev-0 实测驱动的流程改造）**：启动时先确认自己会话名——若为自动分配名（含"test-"等随机形态）或与已知名冲突，建议用户 `/rename supervisor-<后缀>` 固定唯一名；然后扫 `~/.claude/sessions/` 注册表按自己的名字匹配取 **sessionId**（当前版本 ListAgents 只给名字+短 ID，无 UUID，此路径是 sid 唯一可靠来源）。两项就绪后才继续。
+  - **resume 恢复流程（dev-0 实测：resume 保 sid 但重分配名字）**：检测到本 sid 的分片已存在（state.json 里有同 sid 历史）即视为 resume 场景——第一件事 `/rename` 回注册名（或换新唯一名），随即 `registry.py register` upsert 刷新 name，然后向用户汇报中断点继续；期间 worker 若按旧名寻址失败，走死条目报告路径由用户引导 resume（恢复流程收尾后自动重新可达）。
   - **旧布局迁移**：检测到平铺 `.supervisor/state.json`（v2/rework 遗留）→ 询问用户：归档（推荐，`mv` 为 `.supervisor/archive/<started_at>-<旧 goal 摘要>/`）或保留原地不动（本 supervisor 新建分片与旧账并存，旧账不再读写）。用户未答前不创建分片。
   - **registry 注册与并行隔离断言（单次事务）**：完成 ListAgents 自检、拿到自己 session_id 后，执行 F1 定义的单次持锁注册事务——发现其他活跃（非 stale）条目时，锁外与用户确认本方工作分支/worktree 与他方不冲突，确认后重做带校验的注册写入（branch 字段此时填入）；未确认或用户叫停 → ESCALATE，**不写入条目**。
-  - **cron 查重修复**：巡检 cron 的查重标识从"监工定时巡检"改为"监工定时巡检(<本 sid 完整 UUID>)"——多 supervisor 各建各的 cron，互不吞并。用完整 UUID 而非短前缀：查重是字符串包含匹配，短前缀存在跨 supervisor 碰撞类风险（碰撞后果是该 supervisor 永远建不出自己的 cron），而完整 UUID 零成本消灭该风险类（"能硬不软"）。重建条款（巡检 prompt 第 1 条）同步改。
+  - **cron 查重修复**：巡检 cron 的查重标识从"监工定时巡检"改为"监工定时巡检(<本 sid 完整 UUID>)"（dev-0 实测：session-only cron 不跨会话可见，多 supervisor 巡检天然隔离——查重键的实际职责收窄为防**同会话协议重注入**产生双 cron；完整 UUID 消灭碰撞类风险，"能硬不软"）。重建条款（巡检 prompt 第 1 条）同步改。
 - core 巡检步骤改造：每次巡检顺带更新自己 registry 条目的 heartbeat_ts；巡检三步不动。
 - core 收尾改造：CronDelete 巡检 cron 的同时从 registry 注销自己（registry.py unregister）。
 - 其余 core 条款（四层防御/三层回答/OODA/dev-N 骨架/红线）**零改动**——分片只是路径换根，语义不变。
@@ -89,12 +92,13 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 
 - 注册步骤 1 改为：
   1. 读 `<project-dir>/.supervisor/registry.json`（只读）；
-  2. 活跃（非 stale）条目唯一 → 直接以其 session_id 为监工目标；
-  3. 活跃条目多个 → 把列表（name/mode/goal 摘要/branch）展示给用户，请用户指定；
-  4. 无活跃条目或 registry 不存在 → 维持现行兜底：提示监工未启动，或按 `--supervisor <名字|session_id>` 参数指定后用 ListAgents 按名字/sid 查找。
-- `--supervisor` 参数语义扩展：接受名字**或**完整 session_id（sid 优先精确匹配）——确定性通道，跳过列表确认。
+  2. 活跃（非 stale）条目唯一 → 直接以其 **name**（消息路由键，dev-0 实测 SendMessage 只认名称）为监工目标，SendMessage 按名称寻址；
+  3. 活跃条目多个 → 把列表（name/mode/goal 摘要/branch）展示给用户，请用户指定监工名；
+  4. 无活跃条目或 registry 不存在 → 维持现行兜底：提示监工未启动，或按 `--supervisor <会话名>` 参数指定后用 ListAgents 按名字查找。
+- `--supervisor` 参数：接受**会话名称**（必须唯一；ListAgents 中同名多条时用 `<名>[<短ID>]` 消歧形式）——SendMessage 寻址的唯一可用键（UUID/短 ID 实测均不可达）。
+- 注册消息不变；worker 持有的监工名失效时（supervisor resume 重分配名字的窗口期），SendMessage 失败 → 按"疑似死条目"路径报告用户（与 F1 崩溃残留共用处置）。
 - **红线放宽（精确化）**：worker.md 现行"`.supervisor/` 目录永不 add、永不修改"改为——registry.json 与各分片目录**只读**；state.json 及一切分片内容**禁碰**；`.supervisor/` 整体仍永不 add（账本不进 git）。
-- 注册消息不变（SendMessage 按 session_id 寻址天然路由到唯一 supervisor，无广播风险——消息层零改动是本方案的成本优势）。
+- 注册消息不变（SendMessage 按名称寻址路由到唯一 supervisor——名称唯一性断言在注册源头上保证无串台；消息层零改动是本方案的成本优势）。
 
 ### F4 hook 多分片解析（worker-stopfailure.py）
 
@@ -136,7 +140,8 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 | 死条目误判（supervisor 活着但心跳延迟） | stale 判定双条件（不可达 **且** 心跳超 30 分钟）；stale 只标记不删除；worker 注册失败走用户裁决 |
 | 归档目录被误当活分片 | 分片枚举 UUID 目录名白名单（hook/watchdog 同规则）+ 回归用例固化 |
 | hook 错投分片污染他方账 | 分片选择强匹配 worker session_id；多命中取非归档最新，不唯一不投递；pass-2 在多分片下禁用 |
-| "resume 不换 sid"假设不成立 | dev-0 第 6 项直接实测（ListAgents 前后比对）；不成立则分片键方案回炉 |
+| "resume 不换 sid"假设不成立 | dev-0 第 6 项已实测通过（resume 保 sid）；但会话名跨 resume 重分配，由恢复流程（rename + register upsert）补偿 |
+| supervisor resume 窗口期 worker 寻址失效 | 恢复流程第一时间 rename 回注册名 + upsert；失效窗口内 worker 走死条目报告路径，用户引导后自动恢复 |
 | 平铺回退与分片并存的边界 | 回退仅在零分片时生效；一旦存在分片，平铺文件对 hook/watchdog 不可见 |
 | 多 supervisor 同分支混行 | 注册事务内强制隔离确认；DESIGN §9 明示不支持 |
 | 体积预算膨胀 | core 增量条款集中在启动/巡检/收尾三处局部，行为红线与四层防御不动；实测行数回填 DESIGN |

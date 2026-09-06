@@ -32,11 +32,21 @@
 5. **flock 可用性**（F1 前提）：macOS 无原生 /usr/bin/flock（CR 实测确认，仅 shlock）——定案方案已改为 registry.py 助手脚本（python fcntl），本项实测 registry.py 原型：fcntl 持锁读-改-写 + 锁超时语义 + 并发首建（两进程同时 register 无丢失/重复）；四个子命令（register/heartbeat/unregister/mark-stale，作者终审补充）逐一验证。
 6. **resume 保 sid 不变性**（分片键基石假设，CR P1-1）：起一个会话记下 ListAgents 中的 session_id → `claude --resume <sid>` 重开 → ListAgents 再比对——sid 不变则分片键成立；顺带验证 idle 存活会话在 ListAgents 的可见性（stale 判定"可达"语义依赖它）。若 sid 会变，分片键方案回炉重设计。
 
+### 实测记录（2026-09-06，六项全部闭环）
+
+1. **CronList 跨会话可见性：不跨会话可见**。终端 B 的 CronList 显示 No scheduled jobs（A 的 session-only 任务对 B 不可见）——多 supervisor 巡检天然隔离，互不吞并的风险实测不存在；cron 查重键的职责收窄为防同会话协议重注入（UUID 标识保留但理由更新）。
+2. **SendMessage 寻址：只认会话名称**。UUID 形态与 6 位短 ID 均返回 "No agent named ... is reachable"（两轮对照确证）；名称双向寻址成功（test-97 ↔ test-98 各拿到 msg_id）。**spec F3 的"按 session_id 寻址"不成立，回炉为名称寻址 + 唯一性管理**。
+3. **worktree git 定位：通过**。`git rev-parse --git-common-dir` 输出主工作区 .git，取父目录即主工作区根，其下 .supervisor/ 可达；worktree 自身目录无 .supervisor/（特判必要且充分）。
+4. **hook stdin session_id：通过**（子代理实测）。stdin JSON 含 session_id（36 位 UUID，与 transcript 首行及 projects 目录名三方一致）；额外可用：prompt_id/cwd/transcript_path。
+5. **registry.py 原型：通过**。四子命令语义全验证（幂等 upsert/心跳/stale/注销/错误退出码 2）；并发首建竞态：两进程同时 register，fcntl 锁串行化，无丢失无重复。
+6. **resume 保 sid：通过，但会话名重分配**。`claude --resume <uuid>` 成功恢复同一 UUID 会话（sid 持久）；**会话名从 test-98 变为 test-34、短 ID 同变**——会话名是进程生命周期属性，不是持久身份。**推论：supervisor resume 后 worker 手里的旧名字立即失效，必须写恢复流程**。另实测：当前版本 ListAgents **不输出 36 位 UUID**（仅名字+短 ID+状态），v2 存量条款"从 ListAgents 推导 sessionId"失效，sid 获取路径改为扫 `~/.claude/sessions/` 注册表按名字匹配取 sessionId（hook pass-2 同源）。
+
 ### DoD
 
-- [ ] 六项各有独立实测结论（通过/不通过 + 发现）回填本 plan
-- [ ] registry.py 原型锁语义定案；resume sid 结论定案（不成立则 spec 回炉）
-- [ ] 实测产生的临时会话/文件已清理
+- [x] 六项实测结论已回填（含两项推翻设计假设的发现：SendMessage 名称寻址、ListAgents 无 UUID）
+- [x] registry.py 原型锁语义定案；resume sid 结论定案（成立，附名字重分配的补偿设计）
+- [x] 实测产生的临时会话/文件已清理（测试会话已退出，/tmp 产物已删）
+- [ ] spec 实测驱动修订已落地（F1/F2/F3 三处，随本次提交）
 
 ---
 
@@ -44,8 +54,8 @@
 
 ### 步骤
 
-1. `_core-supervisor.md` 启动步骤 3：账本路径改为 `.supervisor/<本 supervisor session_id>/state.json`（分片目录随建）；**旧布局迁移条款**（平铺 state.json 存在 → 问用户：归档到 `.supervisor/archive/<started_at>-<goal 摘要>/` 或原地保留不读写；未答不建分片）。
-2. 启动步骤新增（编号顺延）：**registry 注册与并行隔离断言（单次事务，CR P0-2）**——registry.py register 事务：无他人活跃条目直接写入；有他人活跃条目锁外与用户确认分支/worktree 隔离，确认后重做带校验的注册写入（branch 此时填入）；ESCALATE/叫停不写入条目。register 为按 sid 幂等 upsert（resume 重走启动不产生重复条目，CR P1-1）。
+1. `_core-supervisor.md` 启动步骤 3：账本路径改为 `.supervisor/<本 supervisor session_id>/state.json`（分片目录随建）；启动步骤 2 改造（dev-0 实测驱动）：会话名固定（自动分配名或冲突时建议 /rename supervisor-<后缀>）+ sid 从 `~/.claude/sessions/` 注册表按名字匹配获取（ListAgents 无 UUID）；新增 resume 恢复流程（本 sid 分片已存在 → rename 回注册名 → registry.py register upsert 刷新 name → 汇报中断点继续）；**旧布局迁移条款**（平铺 state.json 存在 → 问用户：归档到 `.supervisor/archive/<started_at>-<goal 摘要>/` 或原地保留不读写；未答不建分片）。
+2. 启动步骤新增（编号顺延）：**registry 注册与并行隔离断言（单次事务，CR P0-2）**——registry.py register 事务：无他人活跃条目直接写入；有他人活跃条目锁外与用户确认分支/worktree 隔离，确认后重做带校验的注册写入（branch 此时填入）；ESCALATE/叫停不写入条目。register 为按 sid 幂等 upsert（resume 重走启动不产生重复条目，CR P1-1）；**事务含名称唯一性断言（dev-0 实测：SendMessage 只认名称）——与他人活跃条目撞名拒绝注册，要求先 /rename 唯一名**。
 3. 启动步骤 6（cron）：查重标识改"监工定时巡检(<本 sid 完整 UUID>)"（碰撞类风险零容忍，见 spec F2），巡检 prompt 里的重建条款同步改标识（含"重建时用自己的完整 sid"）。
 4. 巡检步骤：新增 heartbeat_ts 更新（registry.py heartbeat，仅自己条目）。
 5. 收尾（状态机 dev-N 第 4 条）：CronDelete 同时从 registry 注销自己（registry.py unregister）。
@@ -66,7 +76,7 @@
 ### 步骤
 
 1. 注册步骤 1 重写：读 registry → 唯一活跃条目直接选 / 多条目展示（name/mode/goal_brief/branch）请用户指定 / 无条目走现行 ListAgents 兜底。
-2. `--supervisor` 参数：接受名字或完整 session_id（sid 优先精确匹配），frontmatter argument-hint 同步。
+2. `--supervisor` 参数：接受**会话名称**（必须唯一，SendMessage 唯一可用寻址键——dev-0 实测 UUID/短 ID 均不可达；同名多条用 `<名>[<短ID>]` 消歧），frontmatter argument-hint 同步；另加一条：worker 按监工名 SendMessage 失败时按"疑似死条目"路径报告用户（supervisor resume 重分配名字的窗口期）。
 3. 红线精确化："`.supervisor/` 永不 add、永不修改" → "registry.json 与分片目录**只读**；分片内容禁碰；`.supervisor/` 整体永不 add"。两处红线（并行协作纪律节 + 行为红线节）同步改。
 4. 注册消息格式不动；执行协议主体不动。
 
