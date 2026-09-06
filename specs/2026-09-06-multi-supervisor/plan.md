@@ -77,7 +77,7 @@
 ### 步骤
 
 1. 注册步骤 1 重写：读 registry → 唯一活跃条目直接选 / 多条目展示（name/mode/goal_brief/branch）请用户指定 / 无条目走现行 ListAgents 兜底。
-2. `--supervisor` 参数：接受**会话名称**（必须唯一，SendMessage 唯一可用寻址键——dev-0 实测 UUID/短 ID 均不可达；同名多条用 `<名>[<短ID>]` 消歧），frontmatter argument-hint 同步；另加一条：worker 按监工名 SendMessage 失败时按"疑似死条目"路径报告用户（supervisor resume 重分配名字的窗口期）。
+2. `--supervisor` 参数：接受**会话名称**（必须唯一，SendMessage 唯一可用寻址键——dev-0 实测 UUID/短 ID 均不可达；同名多条用 `<名>[<短ID>]` 消歧），frontmatter argument-hint 同步；另加一条：worker 按监工名 SendMessage 失败时按"疑似死条目"路径报告用户并附三选项清单（resume / 稍后重试 / 转自主模式兜底：完成当前 phase 指令并 commit、不自行流转 phase、恢复后补审）（supervisor resume 重分配名字的窗口期同用此路径）。
 3. 红线精确化："`.supervisor/` 永不 add、永不修改" → "registry.json 与分片目录**只读**；分片内容禁碰；`.supervisor/` 整体永不 add"。两处红线（并行协作纪律节 + 行为红线节）同步改。
 4. 注册消息格式不动；执行协议主体不动。
 
@@ -85,7 +85,7 @@
 
 - [ ] 注册步骤四分支齐全（唯一/多条/无条目/参数指定），每分支命令式
 - [ ] 红线两处一致，无"永不修改"与"只读"措辞冲突
-- [ ] worker.md 行数增量 ≤ 12 行（体积预算）
+- [ ] worker.md 行数增量 ≤ 16 行（含死条目三选项清单）
 
 ---
 

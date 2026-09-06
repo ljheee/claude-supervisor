@@ -72,7 +72,7 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 - **并发写安全**：读-改-写整文件必须持进程内互斥锁（lockfile `.supervisor/registry.lock`）。**实现载体是 `registry.py` 助手脚本**（随 watchdog 同目录安装），提供 `register / heartbeat / unregister / mark-stale` 四个子命令，内部 python fcntl 持锁（超时 5 秒，失败 ESCALATE 用户）——协议条款只约束"调哪个命令"，不要求 LLM 现场构造持锁读-改-写命令（对照：state.json 原子写是单写者无锁纯 mv；install.sh 更新 settings.json 已有 python fcntl 先例）。**写入为同目录 tmp+rename 原子替换（CR2 P2-4）**——读侧（worker 读 registry 选监工/supervisor 读他人条目）是裸读，非原子写会撞半文件。
 - **stale 标记的写路径**：活性检查（ListAgents 可达性）由 supervisor LLM 判断，判定结果经 `registry.py mark-stale <sid>` 写入——**stale 标记也必须走 registry.py，禁止 LLM 直接编辑 registry.json**（否则击穿"并发写全部经锁"）。register 的幂等 upsert 含清除自身 stale 标记（resume 归来自息）。
 - **死条目清理**：supervisor 启动时与每次巡检时，对本条目以外的其他条目做活性检查——**按 name 检查**（该条目的 name 是否出现在 ListAgents 输出中；实测当前版本 ListAgents 不输出 UUID，按 sid 查可达性无从执行）。不可达且 heartbeat 超 30 分钟的条目标记 `"stale": true` 保留（不删：账本分片还在，可能是待 resume 的实例），仅在注销时删除自己的条目。**绝不删除他人条目**。注意：resume 重分配名字会让活着的 supervisor 被 name 检查误判不可达——由 heartbeat 双条件兼作兜底（心跳新鲜即不标 stale），且 resume 恢复流程的 register upsert 自愈。
-- **崩溃残留**：supervisor 进程被杀未来得及注销 → 条目残留。处置：worker REGISTER 的 SendMessage 发送失败/无回应时，worker 向用户报告"疑似死条目"，由用户裁决（resume 那个 supervisor 或人工清理）。不做自动清除。
+- **崩溃残留**：supervisor 进程被杀未来得及注销 → 条目残留。处置：worker REGISTER 的 SendMessage 发送失败/无回应时，worker 向用户报告"疑似死条目"，由用户裁决——worker 报告时附三选项清单：① resume 该 supervisor（推荐，恢复流程自动续命）；② 稍后重试（可能仅是 resume 窗口期，恢复流程收尾后自动重新可达）；③ 确认监工不回来 → worker 转自主模式兜底：完成当前 phase 已下发指令并 commit（git log 为证），不自行流转 phase（phase 裁决临时代行者是用户），supervisor 恢复或用户接手后补审；死条目由用户人工清理（worker 对 registry 只读）。不做自动清除。
 
 ### F2 分片账本 + core 协议改造（存储层）
 
@@ -97,7 +97,7 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
   3. 活跃条目多个 → 把列表（name/mode/goal 摘要/branch）展示给用户，请用户指定监工名；
   4. 无活跃条目或 registry 不存在 → 维持现行兜底：提示监工未启动，或按 `--supervisor <会话名>` 参数指定后用 ListAgents 按名字查找。
 - `--supervisor` 参数：接受**会话名称**（必须唯一；ListAgents 中同名多条时的 `<名>[<短ID>]` 消歧形式为未经实测的语法，dev-6 冒烟前补实测，失败则删除该形式改为提示用户先 rename——CR2 P2-5）——SendMessage 寻址的唯一可用键（UUID/短 ID 实测均不可达）。
-- 注册消息不变；worker 持有的监工名失效时（supervisor resume 重分配名字的窗口期），SendMessage 失败 → 按"疑似死条目"路径报告用户（与 F1 崩溃残留共用处置）。SendMessage 按名称寻址路由到唯一 supervisor——名称唯一性断言在注册源头上保证无串台；消息层零改动是本方案的成本优势。
+- 注册消息不变；worker 持有的监工名失效时（supervisor resume 重分配名字的窗口期），SendMessage 失败 → 按"疑似死条目"路径报告用户（与 F1 崩溃残留共用处置，含三选项清单与单干兜底）。SendMessage 按名称寻址路由到唯一 supervisor——名称唯一性断言在注册源头上保证无串台；消息层零改动是本方案的成本优势。
 - **红线放宽（精确化）**：worker.md 现行"`.supervisor/` 目录永不 add、永不修改"改为——registry.json 与各分片目录**只读**；state.json 及一切分片内容**禁碰**；`.supervisor/` 整体仍永不 add（账本不进 git）。
 
 ### F4 hook 多分片解析（worker-stopfailure.py）
@@ -137,7 +137,7 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 | 风险 | 对冲 |
 |---|---|
 | registry 并发写竞态 | 写入全部经 registry.py 的 fcntl 事务（register 为幂等 upsert）；锁超时 5s + ESCALATE；并发首建有合成测试 |
-| 死条目误判（supervisor 活着但心跳延迟） | stale 判定双条件（不可达 **且** 心跳超 30 分钟）；stale 只标记不删除；worker 注册失败走用户裁决 |
+| 死条目误判（supervisor 活着但心跳延迟） | stale 判定双条件（不可达 **且** 心跳超 30 分钟）；stale 只标记不删除；worker 注册失败走用户三选项裁决（resume / 稍后重试 / 单干） |
 | 归档目录被误当活分片 | 分片枚举 UUID 目录名白名单（hook/watchdog 同规则）+ 回归用例固化 |
 | hook 错投分片污染他方账 | 分片选择强匹配 worker session_id；多命中取非归档最新，不唯一不投递；pass-2 在多分片下禁用 |
 | "resume 不换 sid"假设不成立 | dev-0 第 6 项已实测通过（resume 保 sid）；但会话名跨 resume 重分配，由恢复流程（rename + register upsert）补偿 |
