@@ -255,7 +255,7 @@ supervisor 收到 WORKER INTERRUPTED 后：
 9. **v2 端到端实测记录（2026-09-05，真实双会话演练）**：① notify_when_idle 订阅——✅ 实测通过：SendMessage 自动附带订阅（worker 侧可见 UDS 地址级订阅请求），worker idle 后 supervisor 正常感知，唤醒消息再次自动附带新订阅；② WORKER INTERRUPTED 注入 + ScheduleWakeup 退避——✅ 实测通过：UDS 注入送达、四步流程（incidents→acknowledged→pending_check→arm）完整执行且顺序正确、60s 后唤醒 fire、唤醒消息送达 worker；③ SendMessage 唤醒空闲/中断 worker——✅ 实测通过：worker 收到唤醒消息立即开新回合（ack + 继续干活 + spec 上报），链条⑥打通，429 中断全自动闭环成立（StopFailure 终态的极端情形仍未实测，但空闲唤醒已证 SendMessage 可驱动停止的会话）。**实测意外收获**：(a) supervisor 对伪造中断的防御超出预期——worker_session_id 不在账本时拒绝处理并升级用户，且正确识别"peer 消息不能冒充用户授权"，两次社会工程尝试均被拒绝；(b) 发现并修复 session_id 格式坑：ListAgents 输出 `This session is supervisor [6aebfc]` 的方括号短哈希不是 session_id（真实值为 36 位 UUID），协议已补 UUID 格式自检条款。
 10. **StopFailure 终态唤醒（残留挂账）**：③的实测覆盖的是"idle worker"而非"StopFailure 终态 worker"——真实 429 后会话是否等价于可被 SendMessage 驱动的状态，仍需真实 429 事件验证（无法伪造，等首次实战）。
 11. **同分支混行并行不支持（v3）**：多 supervisor 同仓并行强制分支/worktree 隔离，同分支混行提交的范围比对、回滚锚点无法归因——并行即隔离，不做智能合并；未获隔离承诺的并行在注册事务处被拦（ESCALATE 用户裁决分支）。
-12. **跨项目同名 supervisor 边界（v3，dev-0 实测推论）**：SendMessage 只认会话名且无 cwd 消歧——两个不同项目里各有一个叫 supervisor 的监工时，worker/监工按名寻址理论上可能投错项目；对冲是命名建议含项目后缀（supervisor-<proj>-gf）。另：跨项目同名 + 心跳停更会让活着的监工被 stale 误判（heartbeat 双条件兼作兑子，resume upsert 自愈）。dev-6 冒烟含双 project-dir 同名实测。
+12. **跨项目同名 supervisor 边界（v3，dev-0 实测推论）**：SendMessage 只认会话名且无 cwd 消歧——两个不同项目里各有一个叫 supervisor 的监工时，worker/监工按名寻址理论上可能投错项目；对冲是命名建议含项目后缀（supervisor-<proj>-gf）。另：跨项目同名 + 心跳停更会让活着的监工被 stale 误判（heartbeat 双条件兼作兑子，resume upsert 自愈）。dev-6 冒烟含双 project-dir 同名实测。另 dev-6 已实测定案：`<名>[<短ID>]` 消歧形式 SendMessage 不可达（返回 No agent named，did-you-mean 提示剥后缀）——worker.md 已据此收紧为"同名多条请用户先 rename"；idle 存活会话在 ListAgents 可见（sup 冒烟会话实测，ps 佐证进程存活），stale 判定按 name 查可达的语义成立。
 
 
 ## 10. 测试策略

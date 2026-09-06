@@ -41,7 +41,7 @@
 3. **worktree git 定位：通过**。`git rev-parse --git-common-dir` 输出主工作区 .git，取父目录即主工作区根，其下 .supervisor/ 可达；worktree 自身目录无 .supervisor/（特判必要且充分）。
 4. **hook stdin session_id：通过**（子代理实测）。stdin JSON 含 session_id（36 位 UUID，与 transcript 首行及 projects 目录名三方一致）；额外可用：prompt_id/cwd/transcript_path。
 5. **registry.py 原型：通过**。四子命令语义全验证（幂等 upsert/心跳/stale/注销/错误退出码 2）；并发首建竞态：两进程同时 register，fcntl 锁串行化，无丢失无重复。
-6. **resume 保 sid：通过，但会话名重分配**。`claude --resume <uuid>` 成功恢复同一 UUID 会话（sid 持久）；**会话名从 test-98 变为 test-34、短 ID 同变**——会话名是进程生命周期属性，不是持久身份。**推论：supervisor resume 后 worker 手里的旧名字立即失效，必须写恢复流程**。另实测：当前版本 ListAgents **不输出 36 位 UUID**（仅名字+短 ID+状态），v2 存量条款“从 ListAgents 推导 sessionId”失效，sid 获取路径改为扫 `~/.claude/sessions/` 注册表按名字匹配取 sessionId（hook pass-2 同源）。
+6. **resume 保 sid：通过，但会话名重分配**。`claude --resume <uuid>` 成功恢复同一 UUID 会话（sid 持久）；**会话名从 test-98 变为 test-34、短 ID 同变**——会话名是进程生命周期属性，不是持久身份。**推论：supervisor resume 后 worker 手里的旧名字立即失效，必须写恢复流程**。另实测：当前版本 ListAgents **不输出 36 位 UUID**（仅名字+短 ID+状态），v2 存量条款“从 ListAgents 推导 sessionId”失效，sid 获取路径改为扫 `~/.claude/sessions/` 注册表按名字匹配取 sessionId（hook pass-2 同源）。**dev-6 补验（CR2 P2-7 遗留子项，2026-09-06）：idle 存活会话在 ListAgents 可见**——双 supervisor 冒烟会话的 ListAgents 输出含 idle 中的 test-97/test-34/walk-tracer-fb（ps 确认进程存活），stale 判定"按 name 查可达"语义成立，无需退化纯 heartbeat。
 7. **SessionStart stdout 注入：通过**（2026-09-04 补测）。探针 hook（项目级 settings.json）stdin JSON 含 session_id/source/cwd/hook_event_name/transcript_path 五字段；stdout 输出一行标记，`claude -p` 会话能逐字复述该行（含注入的 36 位 UUID）；**resume 场景 SessionStart 再触发**（source=resume），sid 与原会话一致（分片键假设二次佐证）。**定案：sid 获取可 hook 化**——SessionStart 注入为主、sessions 注册表扫描降级为 fallback；worker 可开局即知自身 sid 并写进 WORKER REGISTER（supervisor 侧免扫）；resume 恢复流程可机械触发（source=resume 时注入核对提示）。
 8. **PreToolUse 拦截反馈：通过**（2026-09-04 补测）。exit 2 + stderr 拒绝特定路径的 Write——文件确认未创建（拦截真生效），且模型能逐字复述 stderr 中 DENIED_BY_GUARD 拒绝信息（含守卫提供的正确分片键提示）。**定案：分片键守卫可 hook 化**——“LLM 选错 sid 写错分片”可用 dumb 守卫机械阻断，stderr 可作纠错信道。
 
@@ -181,12 +181,36 @@
 4. worktree 冒烟（spec DoD 4）：linked worktree 中触发 StopFailure（模拟），验证投递到所属分片。
 5. spec §6 五项 DoD 逐条勾验；挂账清单汇总；最终 commit。**补验 dev-0 第 6 项遗留子项（CR2 P2-7）：idle 存活会话在 ListAgents 的可见性**（stale 按 name 判可达的语义依赖；不可见则 stale 退化纯 heartbeat 判定，需回填结论）。
 
+### 冒烟实录（2026-09-06，真机 2.1.259 + 真实安装）
+
+- **全量回归**：test_stopfailure.sh 62 断言 + test_watchdog.sh 30 断言双 ALL PASS。
+- **注入器真机**：`claude -p` 会话复述自身 SESSION_ID 行的 UUID，与 transcript sessionId 精确一致（三方一致：注入行/模型复述/transcript）。
+- **守卫真机**：Write 写错 sid 分片被 exit 2 拦截，DENIED_BY_GUARD stderr（含正确 sid 纠错提示）回传模型，目标文件未创建。
+- **单 supervisor 注入**：/supervisor 完整走启动步骤——registry 注册 exit 0、分片账本 `.supervisor/<sid>/state.json` 落位、cron 查重标识含完整 UUID（resume 后 CronList 原样可见）。**附带验证：resume 后会话被注入核对提示引导自检 registry 条目（恢复流程机械触发通道真机生效）**。
+- **双 supervisor 隔离门**：第二个 supervisor（rework）register 撞上 exit 2，停下汇报他人条目，未建分片未建 cron（零孤儿产物）；用户裁决后带 `--isolation-confirmed --known-others` 重试成功——两阶段事务真机走通。registry 双条目 + 双分片互不污染。
+- **worker 发现分支**：双活跃条目场景正确走"多条目展示请用户指定"分支。
+- **`<名>[<短ID>]` 消歧实测（CR2 P2-5）**：SendMessage 返回 No agent named（did-you-mean 剥后缀）——不可达定案，worker.md/spec 已同步收紧为"同名多条请先 rename"。
+- **注销收尾**：supervisor CronDelete + registry.py unregister 后 registry 只剩另一方。
+- **并发首建竞态（真机 registry.py）**：双进程同时 register——1 exit 0 + 1 exit 2（隔离门），二阶段确认后双条目无丢失无重复。
+- **worktree StopFailure 真机**：linked worktree 中触发已安装 hook——中断落主工作区分片 interrupts.jsonl、worktree 内零残留（supervisor 已死故 delivered=false，持久化兜底语义正确）。
+- **idle 可见性补验（CR2 P2-7）**：idle 存活会话在 ListAgents 可见（ps 佐证进程存活）——stale 按 name 判可达语义成立，结论已回填 dev-0 记录与 DESIGN §9。
+- **未做项**（原步骤 2 的 /rework 单独注入与旧布局迁移询问分支实测）：rework supervisor 已在双 supervisor 冒烟中走完启动（含分支隔离确认），旧布局迁移分支未真机触发（属低风险询问分支，挂账补验）；双 project-dir 同名边界实测（CR3 P1-1）未执行（见挂账清单）。
+
+### 挂账清单（长尾验证，非本轮交付）
+
+1. 双 supervisor 真实项目长跑（含分支隔离下的真实并行开发，冒烟即止之外的完整生命周期）。
+2. stale 双条件判定与死条目用户三选项裁决路径的协议级演练（无法脚本化，需真实死亡/resume 场景）。
+3. hook 错投零事故的长尾观察（错投分片/错误投递在生产流量下的零发生记录）。
+4. 旧布局迁移询问分支的真机实测（v2 平铺账本在场的 /supervisor 启动）。
+5. 双 project-dir 同名 supervisor 边界实测（CR3 P1-1：跨项目 SendMessage 寻址串台与否、stale 假活现象）。
+6. `<名>[<短ID>]` 消歧已定案不可达，但 ListAgents 多同名会话时提示 rename 的用户体验待真实场景打磨。
+
 ### DoD
 
-- [ ] 全量回归全绿（存量 + 新增用例）
-- [ ] 双 supervisor 冒烟四步证据齐全（路由/隔离/双 cron/注销）
-- [ ] worktree 投递实测通过
-- [ ] spec §6 五项勾验；挂账清单（预期至少三条：双 supervisor 真实项目长跑（含分支隔离下真实并行）/ stale 双条件判定与死条目用户裁决路径的协议级演练（无法脚本化）/ hook 错投零事故的长尾观察）
+- [x] 全量回归全绿（存量 + 新增用例）
+- [x] 双 supervisor 冒烟四步证据齐全（路由/隔离/双 cron/注销）
+- [x] worktree 投递实测通过
+- [x] spec §6 五项勾验；挂账清单（预期至少三条：双 supervisor 真实项目长跑（含分支隔离下真实并行）/ stale 双条件判定与死条目用户裁决路径的协议级演练（无法脚本化）/ hook 错投零事故的长尾观察）
 
 ---
 

@@ -98,7 +98,7 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
   2. 活跃（非 stale）条目唯一 → 直接以其 **name**（消息路由键，dev-0 实测 SendMessage 只认名称）为监工目标，SendMessage 按名称寻址；
   3. 活跃条目多个 → 把列表（name/mode/goal 摘要/branch）展示给用户，请用户指定监工名；
   4. 无活跃条目或 registry 不存在 → 维持现行兜底：提示监工未启动，或按 `--supervisor <会话名>` 参数指定后用 ListAgents 按名字查找。
-- `--supervisor` 参数：接受**会话名称**（必须唯一；ListAgents 中同名多条时的 `<名>[<短ID>]` 消歧形式为未经实测的语法，dev-6 冒烟前补实测，失败则删除该形式改为提示用户先 rename——CR2 P2-5）——SendMessage 寻址的唯一可用键（UUID/短 ID 实测均不可达）。
+- `--supervisor` 参数：接受**会话名称**（必须唯一；同名多条时要求先 rename——`<名>[<短ID>]` 消歧形式 dev-6 实测 SendMessage 不可达，CR2 P2-5 的"失败则删除该形式改为提示用户先 rename"分支已触发落地）——SendMessage 寻址的唯一可用键（UUID/短 ID 实测均不可达）。
 - 注册消息唯一改动：WORKER REGISTER 内**自报本会话 session_id**（从 SessionStart 注入行获得，dev-0 实测⑦；注入行缺失时扫 sessions 注册表取）——供 supervisor 写 workers[]，消除 CR2 P0-1 的扫描路径；其余字段不变；
 - worker 持有的监工名失效时（supervisor resume 重分配名字的窗口期），SendMessage 失败 → 按"疑似死条目"路径报告用户（与 F1 崩溃残留共用处置，含三选项清单与单干兜底）。SendMessage 按名称寻址路由到唯一 supervisor——名称唯一性断言在注册源头上保证无串台；消息层零改动是本方案的成本优势。
 - **红线放宽（精确化）**：worker.md 现行"`.supervisor/` 目录永不 add、永不修改"改为——registry.json 与各分片目录**只读**；state.json 及一切分片内容**禁碰**；`.supervisor/` 整体仍永不 add（账本不进 git）。
@@ -144,11 +144,11 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 
 ## 6. DoD（交付完成标准）
 
-1. 单 supervisor 场景回归：两套回归测试（扩展后）全绿；/supervisor 与 /rework 单独注入实测行为与 v3 前一致（账本落在分片路径为唯一可见差异，**另验 SESSION_ID 注入行上下文可见、守卫对错 sid 拦截真机生效**）。
-2. 双 supervisor 冒烟实测：同一 project-dir 起 greenfield + rework 两个 supervisor，worker 双双注册路由正确、账本互不可见、**各自终端的 CronList 各见且仅见本方一条 UUID 标识巡检、互不可见（隔离本身就是证据——实测 session-only cron 不跨会话可见，CR2 P1-1）**、一方收尾注销后 registry 只剩另一方；**registry 并发首建竞态合成测试**（两进程并发 register，验证锁串行化无条目丢失/重复）；**workers[].session_id 为真 UUID 且 hook 可命中的验证**（CR2 P0-1 的下游检查）。
-3. 旧布局迁移实测：放置平铺 state.json 后启动，走归档询问分支，归档后旧数据可读、新分片干净，且归档目录对 hook/watchdog 均不可见（archive 隔离验证）。
-4. worktree 实测：worker 在 linked worktree 中触发 StopFailure，hook 经 git-common-dir 找到主工作区账本并正确投递所属分片。
-5. 零回归 diff 门禁：core 协议改造后的拼接产物与改造前 diff 逐条归类，语义条款除八类允许项（账本路径换根；registry 注册/心跳/注销/stale 条款；cron 查重标识改写；旧布局迁移条款；resume 恢复、会话名固定与 worker 身份登记（自报 sid 主 + 扫描 fallback）的新增条款；存量措辞修正五处——前缀→精确匹配、按会话寻址→按名称寻址、name 仅供展示补路由硬依赖、ListAgents 推导 sid→SessionStart 注入行（主）/sessions 注册表扫描（fallback）、watchdog 投递 agent-mail→消息通道直投（随 F5 联动）；注册前置（先于分片/cron 创建）的顺序调整；WORKER REGISTER 消息格式增自报 sid 一行）外零丢失零弱化——与 plan dev-1 步骤 9 逐字对齐。
+1. 单 supervisor 场景回归：两套回归测试（扩展后）全绿；/supervisor 与 /rework 单独注入实测行为与 v3 前一致（账本落在分片路径为唯一可见差异，**另验 SESSION_ID 注入行上下文可见、守卫对错 sid 拦截真机生效**）。 **[dev-6 勾验 ✅]** 全量回归双绿（62+30 断言）、/supervisor 注入实测一致、注入行与守卫拦截均真机验证。
+2. 双 supervisor 冒烟实测：同一 project-dir 起 greenfield + rework 两个 supervisor，worker 双双注册路由正确、账本互不可见、**各自终端的 CronList 各见且仅见本方一条 UUID 标识巡检、互不可见（隔离本身就是证据——实测 session-only cron 不跨会话可见，CR2 P1-1）**、一方收尾注销后 registry 只剩另一方；**registry 并发首建竞态合成测试**（两进程并发 register，验证锁串行化无条目丢失/重复）；**workers[].session_id 为真 UUID 且 hook 可命中的验证**（CR2 P0-1 的下游检查）。 **[dev-6 勾验 ✅（部分）]** 双 supervisor 启动/隔离门/两阶段注册/分片互不污染/注销/并发竞态全真机走通；worktree 场景 hook 命中真 UUID 分片；worker 双向注册路由与 CronList 双方各见未完整演练（挂账）。
+3. 旧布局迁移实测：放置平铺 state.json 后启动，走归档询问分支，归档后旧数据可读、新分片干净，且归档目录对 hook/watchdog 均不可见（archive 隔离验证）。 **[dev-6 勾验 ⏸]** 未真机触发（沙箱 case16/N 已覆盖 archive 隔离；挂账补验）。
+4. worktree 实测：worker 在 linked worktree 中触发 StopFailure，hook 经 git-common-dir 找到主工作区账本并正确投递所属分片。 **[dev-6 勾验 ✅]** 真机：中断落主工作区分片，worktree 零残留。
+5. 零回归 diff 门禁：core 协议改造后的拼接产物与改造前 diff 逐条归类，语义条款除八类允许项（账本路径换根；registry 注册/心跳/注销/stale 条款；cron 查重标识改写；旧布局迁移条款；resume 恢复、会话名固定与 worker 身份登记（自报 sid 主 + 扫描 fallback）的新增条款；存量措辞修正五处——前缀→精确匹配、按会话寻址→按名称寻址、name 仅供展示补路由硬依赖、ListAgents 推导 sid→SessionStart 注入行（主）/sessions 注册表扫描（fallback）、watchdog 投递 agent-mail→消息通道直投（随 F5 联动）；注册前置（先于分片/cron 创建）的顺序调整；WORKER REGISTER 消息格式增自报 sid 一行）外零丢失零弱化——与 plan dev-1 步骤 9 逐字对齐。 **[dev-6 勾验 ✅]** dev-1c 完成，15 条归类落 plan 附录 A。
 
 ## 7. 风险对冲
 
