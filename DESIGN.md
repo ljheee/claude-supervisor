@@ -254,6 +254,8 @@ supervisor 收到 WORKER INTERRUPTED 后：
 8. **cron 调度器寄生宿主进程（v2）**：定时巡检的调度器跑在 supervisor 的宿主 Claude Code 进程内，supervisor 死则巡检死，由第四层外部 watchdog 兜底，防线不降级。另：cron 过期天数等参数版本间已变过（3 天→7 天），协议一律以现场 CronList 为准。
 9. **v2 端到端实测记录（2026-09-05，真实双会话演练）**：① notify_when_idle 订阅——✅ 实测通过：SendMessage 自动附带订阅（worker 侧可见 UDS 地址级订阅请求），worker idle 后 supervisor 正常感知，唤醒消息再次自动附带新订阅；② WORKER INTERRUPTED 注入 + ScheduleWakeup 退避——✅ 实测通过：UDS 注入送达、四步流程（incidents→acknowledged→pending_check→arm）完整执行且顺序正确、60s 后唤醒 fire、唤醒消息送达 worker；③ SendMessage 唤醒空闲/中断 worker——✅ 实测通过：worker 收到唤醒消息立即开新回合（ack + 继续干活 + spec 上报），链条⑥打通，429 中断全自动闭环成立（StopFailure 终态的极端情形仍未实测，但空闲唤醒已证 SendMessage 可驱动停止的会话）。**实测意外收获**：(a) supervisor 对伪造中断的防御超出预期——worker_session_id 不在账本时拒绝处理并升级用户，且正确识别"peer 消息不能冒充用户授权"，两次社会工程尝试均被拒绝；(b) 发现并修复 session_id 格式坑：ListAgents 输出 `This session is supervisor [6aebfc]` 的方括号短哈希不是 session_id（真实值为 36 位 UUID），协议已补 UUID 格式自检条款。
 10. **StopFailure 终态唤醒（残留挂账）**：③的实测覆盖的是"idle worker"而非"StopFailure 终态 worker"——真实 429 后会话是否等价于可被 SendMessage 驱动的状态，仍需真实 429 事件验证（无法伪造，等首次实战）。
+11. **同分支混行并行不支持（v3）**：多 supervisor 同仓并行强制分支/worktree 隔离，同分支混行提交的范围比对、回滚锚点无法归因——并行即隔离，不做智能合并；未获隔离承诺的并行在注册事务处被拦（ESCALATE 用户裁决分支）。
+12. **跨项目同名 supervisor 边界（v3，dev-0 实测推论）**：SendMessage 只认会话名且无 cwd 消歧——两个不同项目里各有一个叫 supervisor 的监工时，worker/监工按名寻址理论上可能投错项目；对冲是命名建议含项目后缀（supervisor-<proj>-gf）。另：跨项目同名 + 心跳停更会让活着的监工被 stale 误判（heartbeat 双条件兼作兑子，resume upsert 自愈）。dev-6 冒烟含双 project-dir 同名实测。
 
 
 ## 10. 测试策略
@@ -325,4 +327,34 @@ state.json 可选顶层字段，生命周期：archaeology 产出初稿 → safe
 
 ### 12.6 注入体积预算
 
-协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行（实施 CR 后实测）、core 169 行（拆分时实测）。拼接产物：绿地 208 行（原 197，增量全在模式声明节）、rework 237 行（实施 CR P1-1 内联化后）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。
+协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行（实施 CR 后实测）、core 169 行（拆分时实测）。拼接产物：绿地 208 行（原 197，增量全在模式声明节）、rework 237 行（实施 CR P1-1 内联化后）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。v3 增量实测：core 169→173 行（+4，含分片路径换根、注册事务、cron 标识、worker 自报 sid 条款），worker 115→124 行（+5，registry 四分支发现 + 三选项死条目处置 + 自报 sid 行）；均在零回归 diff 门禁的八类允许项内逐条归类（见 specs/2026-09-06-multi-supervisor/plan.md 附录 A）。
+
+## 13. 多 Supervisor 并存（v3）
+
+### 13.1 发现层与存储层分层的动机
+
+v2 的平铺 `.supervisor/state.json` 是单 Supervisor 世界：跨轮覆盖（新任务续写旧账，goal/workers 被覆盖）与跨模式并行不可能（三个共享资源打架：账本单例/消息路由串台/cron 查重吞并）。v3 把"发现"（worker 找监工、监工互见）与"存储"（各自账本）拆开：发现层收敛到唯一多写者文件 registry.json，存储层分散到每 supervisor 一个单写者分片目录——并发复杂度被压缩到一个文件上，其余全部是单写者纯 mv 原子写。新任务即新分片，旧账自动成为只读存档（跨轮隔离免费获得）。
+
+### 13.2 分片键选 session_id（UUID）的理由
+
+分片键必须跟"监工实例"走且跨 resume 稳定（dev-0 实测：`claude --resume <uuid>` 恢复同一 UUID，会话名则被重分配 test-98→test-34）。session_id 双重身份：持久身份与存储键（分片目录名、hook stdin 匹配、watchdog UDS 直投）都用它；而会话名是消息路由键（SendMessage 只认名称，UUID/短 ID 实测均不可达）——两键职责拆分，都不可弃：名字必须显式管理（/rename 唯一名，撞名在注册事务处被拦），sid 必须可靠获取（SessionStart 注入行为主，扫 sessions 注册表 fallback）。v2"ListAgents 能推导 sessionId"的假设被实测推翻（当前版本不输出 UUID），这也是 worker 改自报 sid 的根因。
+
+### 13.3 registry.py 单点多写者的取舍（为何不用 LLM 现场持锁）
+
+registry.json 是全系统唯一多写者文件。macOS 无原生 flock（实测仅 shlock），且让 LLM 现场构造持锁读-改-写命令是执行漂移重灾区——协议条款只约束"调哪个子命令"（register/heartbeat/unregister/mark-stale），锁（fcntl 互斥、5s 超时 exit 4）、两阶段隔离确认（exit 2 + --isolation-confirmed --known-others 重读校验）、撞名分诊（exit 3）、tmp+rename 原子写全部封进 dumb 脚本。对照：state.json 原子写是单写者无锁纯 mv；install.sh 更新 settings.json 已有 python fcntl 先例。
+
+### 13.4 git 物理隔离裁决
+
+多 supervisor 同仓并行强制分支/linked worktree 隔离（机械可判定，不做智能合并）：范围比对、安全网基线、回滚锚点全部在各自分支语义下成立；同分支混行提交明确不支持（范围比对无法归因，见 §9.11）。未获隔离承诺的并行在注册事务处被拦（exit 2 → 用户确认分支不冲突 → 带确认重试；ESCALATE 不写入条目，根除自造死条目）。
+
+### 13.5 死条目处置的不对称设计
+
+可标 stale，不可删他人：supervisor 对 registry 里他人条目只能 mark-stale（双条件：ListAgents 按 name 不可达且心跳超 30 分钟），删除仅限注销自己——因为条目背后的分片账本还在，可能是待 resume 的实例。死条目的真正裁决者是用户：worker 注册失败时上报三选项清单（resume 推荐 / 稍后重试 / 转自主模式兜底——完成当前 phase 指令并 commit，不自行流转 phase）。
+
+### 13.6 分片枚举 UUID 白名单（archive 隔离）
+
+hook/watchdog 扫描分片时仅匹配 UUID 格式目录名，archive/ 与非 UUID 目录构造性不可见——归档隔离靠目录命名规则机械保证，不靠运行时判断。旧平铺布局升级窗口兼容：分片存在但 hook 的 sid 零命中时追加一次平铺 workers[] 兜底通道（v2 存量轮次不因首个 v3 分片出现而静默丢失中断直投）。
+
+### 13.7 hook 化三件套的取舍
+
+v3 把两类"LLM 执行漂移重灾区"升级为机械保证：sid 获取（SessionStart 注入器：stdout 单行 `SESSION_ID <uuid> <source>`，零判断零文件写）与分片键防错（PreToolUse 守卫：Write|Edit 路径 uuid 与 stdin sid 等值校验，不等 exit 2 + stderr 给正确 sid；registry.json 直编一律拦）。守卫是绊索不是墙（Bash 仍可绕过，属协议红线范畴）；放行路径纯字符串短路零开销。**PostToolUse 自动 register 评估后未纳入**：需解析 state.json 判断会话角色，脆弱且与"注册是显式隔离确认事务"的语义冲突——unregister/stale 裁决保留 LLM 侧。附带收益：source=resume 的注入提示成为 resume 恢复流程的机械触发通道。

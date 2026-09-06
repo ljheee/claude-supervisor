@@ -6,9 +6,15 @@
 #   /supervisor  - initialize the current session as the greenfield-mode supervisor
 #   /rework      - initialize the current session as the rework/refactor supervisor
 #   /worker      - register the current session as a supervised worker
+#   registry.py  - v3 discovery-layer helper (installed to ~/.agent-mail, next
+#                  to watchdog; all registry.json writes go through it)
 #   watchdog     - external overdue-worker detector (installed to ~/.agent-mail)
 #   StopFailure  - auto-report interrupted workers (hook, installed to
 #                  ~/.claude/hooks/claude-supervisor/ and registered in settings.json)
+#   SessionStart - v3 identity injector: prints "SESSION_ID <uuid> <source>"
+#                  into every session's context (user-level registration)
+#   PreToolUse   - v3 shard guard for Write|Edit: blocks cross-shard writes
+#                  and direct registry.json edits (user-level registration)
 #
 # Command files are ASSEMBLED at install time: mode layer (frontmatter +
 # mode-specific sections) + commands/_core-supervisor.md (shared core protocol).
@@ -122,12 +128,17 @@ if [ -f "$MAIL_HOME/supervisor-watchdog" ] && \
 fi
 install -m 755 "$SRC/watchdog.sh" "$MAIL_HOME/supervisor-watchdog"
 
-echo "==> Installing StopFailure hook to $HOOK_DIR"
+echo "==> Installing registry.py to $MAIL_HOME/registry.py"
+install_backup "$SRC/hooks/registry.py" "$MAIL_HOME/registry.py"
+
+echo "==> Installing hooks to $HOOK_DIR"
 mkdir -p "$HOOK_DIR"
 install_backup "$SRC/hooks/worker-stopfailure.py" "$HOOK_DIR/worker-stopfailure.py"
+install_backup "$SRC/hooks/session-start-injector.py" "$HOOK_DIR/session-start-injector.py"
+install_backup "$SRC/hooks/shard-guard.py" "$HOOK_DIR/shard-guard.py"
 
-echo "==> Registering StopFailure hook in $SETTINGS"
-python3 - "$SETTINGS" "$HOOK_DIR/worker-stopfailure.py" <<'PYEOF'
+echo "==> Registering hooks in $SETTINGS (user-level)"
+python3 - "$SETTINGS" "$HOOK_DIR/worker-stopfailure.py" "$HOOK_DIR/session-start-injector.py" "$HOOK_DIR/shard-guard.py" <<'PYEOF'
 import fcntl
 import json
 import os
@@ -136,8 +147,14 @@ import shutil
 import stat
 import sys
 
-settings, script = sys.argv[1], sys.argv[2]
-command = "python3 %s" % shlex.quote(script)
+settings = sys.argv[1]
+hook_scripts = sys.argv[2:]
+# (event, matcher, script-index) -- None matcher means no matcher field
+HOOK_REGISTRATIONS = [
+    ("StopFailure", None, 0),
+    ("SessionStart", None, 1),
+    ("PreToolUse", "Write|Edit", 2),
+]
 
 
 def same_command(a, b):
@@ -175,25 +192,41 @@ try:
               file=sys.stderr)
         sys.exit(1)
 
-    hooks = cfg.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        print("  ERROR: hooks section of %s is not an object; aborting."
-              % settings, file=sys.stderr)
-        sys.exit(1)
-    entries = hooks.setdefault("StopFailure", [])
-    if not isinstance(entries, list):
-        print("  ERROR: hooks.StopFailure of %s is not an array; aborting."
-              % settings, file=sys.stderr)
-        sys.exit(1)
-    for group in entries:
-        if not isinstance(group, dict):
-            continue
-        for h in group.get("hooks", []):
-            if isinstance(h, dict) and same_command(h.get("command") or "", command):
-                print("  StopFailure hook already registered; nothing to do")
-                sys.exit(0)
+    already = {}
+    for event, matcher, idx in HOOK_REGISTRATIONS:
+        script = hook_scripts[idx]
+        command = "python3 %s" % shlex.quote(script)
+        entries = cfg.setdefault("hooks", {}).setdefault(event, [])
+        if not isinstance(entries, list):
+            print("  ERROR: hooks.%s of %s is not an array; aborting."
+                  % (event, settings), file=sys.stderr)
+            sys.exit(1)
+        found = False
+        for group in entries:
+            if not isinstance(group, dict):
+                continue
+            if matcher is not None and group.get("matcher") != matcher:
+                continue
+            for h in group.get("hooks", []):
+                if isinstance(h, dict) and same_command(
+                        h.get("command") or "", command):
+                    found = True
+                    break
+            if found:
+                break
+        already[(event, matcher)] = (entries, command, found)
 
-    entries.append({"hooks": [{"type": "command", "command": command}]})
+    for (event, matcher), (entries, command, found) in already.items():
+        if found:
+            label = event + (" (matcher %s)" % matcher if matcher else "")
+            print("  %s hook already registered; nothing to do" % label)
+            continue
+        group = {"hooks": [{"type": "command", "command": command}]}
+        if matcher is not None:
+            group["matcher"] = matcher
+        entries.append(group)
+        label = event + (" (matcher %s)" % matcher if matcher else "")
+        print("  registered hooks.%s -> %s" % (label, command))
 
     # atomic replace: unique tmp file, preserve original mode, fsync
     old_mode = None
@@ -212,7 +245,6 @@ try:
     if old_mode is not None:
         os.chmod(tmp, old_mode)
     os.replace(tmp, settings)
-    print("  registered hooks.StopFailure -> %s" % command)
 finally:
     fcntl.flock(lock_fd, fcntl.LOCK_UN)
     os.close(lock_fd)
@@ -233,6 +265,9 @@ echo ""
 echo "  （可开更多终端重复 /worker，多 worker 并行受监工）"
 echo ""
 echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查→逐Phase开发(先自CR再受审)→总结报告（绿地）；rework 模式为 考古→安全网→改造规格→计划→逐Phase开发"
+echo "多 supervisor 并存（v3）：同一项目可同时跑多个监工（如 /supervisor 开新模块 + /rework 改存量），"
+echo "各用唯一会话名（建议 /rename supervisor-gf / supervisor-rw，含项目后缀更稳）+ 各自分支/worktree 隔离；"
+echo "账本按 session_id 分片互不污染，worker 启动时从 .supervisor/registry.json 自选监工。"
 echo "依赖: Claude Code >= 2.1.224（ListAgents + SendMessage；StopFailure hook 需 >= 2.1.259，"
 echo "      官方无检测接口，请自行 claude --version 确认）"
 echo ""
@@ -240,5 +275,9 @@ echo "中断防御（可选）: cron 定时跑 watchdog，worker 失联时投递
 echo "  */10 * * * * $MAIL_HOME/supervisor-watchdog '/path/to/repo' 60"
 echo ""
 echo "中断防御（已自动安装）: StopFailure hook——worker 回合因 429/网络/API 错误被掐断时，"
-echo "自动向 supervisor 的 UDS 通道直投 WORKER INTERRUPTED，并落盘 .supervisor/interrupts.jsonl。"
+echo "自动向 supervisor 的 UDS 通道直投 WORKER INTERRUPTED，并落盘 .supervisor/<sid>/interrupts.jsonl"
+echo "（v3 分片路径，<sid> 是该 supervisor 的 session_id；旧平铺布局自动兼容）。"
 echo "仅对被监工项目里已注册（session_id 匹配）的 worker 会话生效，其他会话零干扰。"
+echo ""
+echo "v3 机械保障（已自动安装）: SessionStart 注入器——每个会话开局自动注入自身 SESSION_ID；"
+echo "PreToolUse 分片守卫——Write|Edit 写错分片或直编 registry.json 时机械拦截并给出正确分片键。"

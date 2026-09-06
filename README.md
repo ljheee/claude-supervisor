@@ -12,7 +12,7 @@
 bash install.sh
 ```
 
-安装内容：`/supervisor`、`/rework`、`/worker` 三个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；StopFailure hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json`，幂等）；watchdog 脚本（→ `~/.agent-mail/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言（关键节齐全/无重复标题），断言失败同样中止不留半成品。
+安装内容：`/supervisor`、`/rework`、`/worker` 三个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；三个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）；registry.py（→ `~/.agent-mail/registry.py`，v3 发现层助手，所有 registry.json 写操作经它）；watchdog 脚本（→ `~/.agent-mail/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言（关键节齐全/无重复标题），断言失败同样中止不留半成品。
 
 版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。
 
@@ -31,7 +31,7 @@ cd /path/to/repo && claude
 # 终端C、D...：可再开更多 worker，多 worker 并行受监工（各自 scope 隔离）
 ```
 
-之后你只需要跟 supervisor 会话对话（进度询问、需求澄清的回答都在它终端）；worker 按指令干活、自 CR、上报。supervisor 靠 session_id 识别每个 worker（注册时自动解析，重名/改名不串扰），你不用管细节。
+之后你只需要跟 supervisor 会话对话（进度询问、需求澄清的回答都在它终端）；worker 按指令干活、自 CR、上报。supervisor 靠 session_id 识别每个 worker（worker 注册时自报 + supervisor 扫描交叉验证，重名/改名不串扰），你不用管细节。
 
 ## 老项目修补/重构（rework 模式）
 
@@ -69,7 +69,7 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 | worker 自己遇到环境卡点（工具失败、依赖坏） | worker 主动发 WORKER STALLED，supervisor 给替代方案或升级你 |
 | 进程被杀 / 终端关闭 | hook 无法执行（执行主体已消失）——watchdog/巡检发现超时静默后升级你，附 session_id 和 `claude --resume` 恢复指引；恢复后 worker 发 WORKER RESUME 报到 |
 
-中断流水落盘 `.supervisor/interrupts.jsonl`，supervisor 处理后在 `.supervisor/acknowledged.jsonl` 记账；两者差集 = 未处理中断，每次被唤醒自动补课（即使当时 supervisor 不在线也不会漏）。每 Phase 立即 commit 的纪律保证任何中断最多丢当前 Phase 未提交部分。
+中断流水落盘 `.supervisor/<sid>/interrupts.jsonl`（v3 分片路径，`<sid>` 是该 supervisor 的 session_id；旧平铺布局自动兼容），supervisor 处理后在同目录 `acknowledged.jsonl` 记账；两者差集 = 未处理中断，每次被唤醒自动补课（即使当时 supervisor 不在线也不会漏）。每 Phase 立即 commit 的纪律保证任何中断最多丢当前 Phase 未提交部分。
 
 前提：项目 `.gitignore` 加 `.supervisor/`（supervisor 启动时也会提醒）。
 
@@ -92,15 +92,27 @@ crontab -e
 # */10 * * * * ~/.agent-mail/supervisor-watchdog /path/to/repo 60
 ```
 
-发现逾期 worker 时通过 agent-mail 向 supervisor 投递 WATCHDOG ALERT（含 session_id 与恢复指引）并弹 macOS 通知（前提：supervisor 在 agent-mail 注册过，即 `/supervisor` 启动过的机器上装了 agent-mail）。告警自带梯度去重：静默每加深一个阈值才再告警一次（T、2T、3T…），不会刷屏；无逾期零输出。路径含空格时给 cron 行里的项目目录加引号。
+发现逾期 worker 时按分片 supervisor 的 session_id 精确匹配 `~/.claude/sessions/` 后 UDS 直投 WATCHDOG ALERT（含 session_id 与恢复指引）并弹 macOS 通知——多 supervisor 并存时按 sid 路由不会串台（前提：supervisor 会话活着且可达；socket 不可达时该告警丢弃，watchdog 本就是第四层 best-effort）。告警自带梯度去重：静默每加深一个阈值才再告警一次（T、2T、3T…），不会刷屏；无逾期零输出。路径含空格时给 cron 行里的项目目录加引号。
 
 ## 命令
 
 - `/supervisor <目标> [--project-dir DIR]`：绿地开发模式监工（前置阶段 clarify→spec→plan）。
 - `/rework <改造目标> [--project-dir DIR] [--baseline <git-ref>]`：老项目修补/重构模式监工（前置阶段 archaeology→safety-net→spec→plan，含不改清单与顺手重构红线）。
-- `/worker [--supervisor NAME]`：把当前会话注册成受监工的工人（模式无关）。已含上报协议与中断恢复协议。
+- `/worker [--supervisor <会话名>]`：把当前会话注册成受监工的工人（模式无关）。已含上报协议与中断恢复协议。`--supervisor` 接受**会话名称**（SendMessage 唯一可用寻址键；无此参数时 worker 自动读 `.supervisor/registry.json` 选监工——唯一活跃条目直接选，多条目列出来请你指定）。
 
 两模式共享同一份核心协议（身份/四层中断防御/账本/OODA/三层回答防火墙），由 install.sh 在安装期拼接进各自命令。
+
+## 多 supervisor 并存（v3）
+
+同一项目可同时跑多个监工（典型场景：`/supervisor` 开新模块 + `/rework` 改存量并行）。隔离靠三件事：
+
+- **唯一会话名**：每个监工用 `/rename` 固定唯一名（建议 `supervisor-<模式或项目后缀>`，如 `supervisor-gf` / `supervisor-rw`；跨项目同名 supervisor 无法被 SendMessage 消歧，命名含项目后缀更稳）。名字是消息路由键，撞名会串台。
+- **各自分支/worktree**：多 supervisor 同仓并行是硬性要求——各队伍在不同分支或 linked worktree 上工作（协议启动时强制隔离确认）；同分支混行提交不支持，冲突升级用户裁决。
+- **账本分片**：每轮任务的账本在 `.supervisor/<supervisor 的 session_id>/` 下（state.json / interrupts.jsonl / acknowledged.jsonl），互不可见；发现层在 `.supervisor/registry.json`（registry.py 维护，worker 启动时只读它选监工）。新任务即新分片，旧账自动成为只读存档。
+
+旧平铺布局（v2/rework 的 `.supervisor/state.json`）在 v3 supervisor 启动时会被识别并引导归档到 `.supervisor/archive/`（归档目录对 hook/watchdog 不可见，不会被误当活分片）。
+
+监工意外死亡时 registry 里会留下死条目：worker 向它注册失败时会把三选项清单报给你（resume 该监工 / 稍后重试 / 转自主模式单干）；stale 判定双条件（不可达且心跳超 30 分钟）只标记不删他人条目。
 
 ## 常见问题
 
@@ -116,8 +128,9 @@ crontab -e
 ```bash
 rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/worker.md
 rm -rf ~/.claude/hooks/claude-supervisor
-rm ~/.agent-mail/supervisor-watchdog
-# 并从 ~/.claude/settings.json 的 hooks.StopFailure 数组中删掉对应条目
+rm ~/.agent-mail/supervisor-watchdog ~/.agent-mail/registry.py
+# 并从 ~/.claude/settings.json 的 hooks.StopFailure / hooks.SessionStart /
+# hooks.PreToolUse 数组中删掉对应条目
 ```
 
 ## 文件清单
@@ -127,11 +140,15 @@ rm ~/.agent-mail/supervisor-watchdog
 | `commands/_core-supervisor.md` | 核心协议片段（拼接原料，不单独安装） |
 | `commands/supervisor.md` | /supervisor 绿地模式层（安装期与 core 拼接） |
 | `commands/rework.md` | /rework 重构模式层（安装期与 core 拼接） |
-| `commands/worker.md` | /worker 命令（工人协议） |
-| `hooks/worker-stopfailure.py` | StopFailure hook（中断自动上报） |
-| `watchdog.sh` | 外部逾期巡检脚本 |
-| `test_stopfailure.sh` | hook 回归测试（22 项断言） |
-| `test_watchdog.sh` | watchdog 回归测试（15 项断言） |
+| `commands/worker.md` | /worker 命令（工人协议，v3 含 registry 发现/自报 sid） |
+| `hooks/worker-stopfailure.py` | StopFailure hook（中断自动上报，v3 多分片解析） |
+| `hooks/session-start-injector.py` | SessionStart hook（会话身份注入，v3） |
+| `hooks/shard-guard.py` | PreToolUse hook（分片写入守卫，v3） |
+| `hooks/registry.py` | 发现层助手（registry.json 的 fcntl 互斥写，v3，安装到 ~/.agent-mail） |
+| `watchdog.sh` | 外部逾期巡检脚本（v3 分片遍历 + UDS 直投） |
+| `test_stopfailure.sh` | hook 回归测试（v3 扩展，58 项断言） |
+| `test_watchdog.sh` | watchdog 回归测试（v3 扩展，30 项断言） |
 | `specs/2026-09-05-scheduled-supervision/` | v2 spec/plan + 定时任务机制实测记录（claude_cron.md） |
+| `specs/2026-09-06-multi-supervisor/` | v3 spec/plan（多 supervisor 并存） |
 | `install.sh` | 安装 |
 | `DESIGN.md` | 技术设计原理 |

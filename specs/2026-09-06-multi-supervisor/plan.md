@@ -165,9 +165,9 @@
 
 ### DoD
 
-- [ ] grep 无过时表述（"单 supervisor"/"唯一监工"类与 v3 矛盾的措辞）
-- [ ] DESIGN 13 节七要素齐全，行数与实测一致
-- [ ] install.sh 重装幂等（产物 diff 为空；settings.json hook 注册不重复追加）
+- [x] grep 无过时表述（"单 supervisor"/"唯一监工"类与 v3 矛盾的措辞）
+- [x] DESIGN 13 节七要素齐全，行数与实测一致
+- [x] install.sh 重装幂等（产物 diff 为空；settings.json hook 注册不重复追加）
 
 ---
 
