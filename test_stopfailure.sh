@@ -410,6 +410,28 @@ assert_eq "case18 flat fallback delivered=true" "True" "$D18"
 N18B=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
 assert_eq "case18 shard A untouched by flat worker" "$N18" "$N18B"
 
+# ---------- case 18b: upgrade window (1 shard + flat) -> pass-2 disabled ----------
+# v2 flat ledger still on disk (its supervisor sid is DEAD), one v3 shard whose
+# same-NAME supervisor is alive and listening. Old code only disabled pass-2 at
+# n_shards>1 and would misdeliver the v2 worker's interrupt to the v3 stranger.
+# Drop shard B first so this case runs with EXACTLY ONE shard.
+rm -rf "$P3/.supervisor/$SID_B"
+python3 - "$P3/.supervisor/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]
+st = json.load(open(p))
+st["supervisor_session_id"] = "v2-dead-sid"  # v2 supervisor is gone
+json.dump(st, open(p, "w"))
+EOF
+start_server "$SUPA_SOCK" "$TMP/recv18b.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-flat","cwd":"'"$P3"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+if grep -qF 'WORKER INTERRUPTED' "$TMP/recv18b.txt"; then
+  fail "case18b upgrade-window misdelivery to same-name v3 supervisor"
+else pass "case18b pass-2 disabled with 1 shard (upgrade window safe)"; fi
+D18B=$(json_field "$P3/.supervisor/interrupts.jsonl" "objs[-1]['delivered']")
+assert_eq "case18b flat interrupt persisted delivered=false" "False" "$D18B"
+
 # ---------- case 19: shard guard blocks registry.json direct write ----------
 echo '{"session_id":"'"$SID_A"'","tool_name":"Write","tool_input":{"file_path":"'"$P3"'/.supervisor/registry.json"}}' \
   | python3 "$GUARD" 2>"$TMP/g19.err"

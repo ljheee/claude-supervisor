@@ -146,7 +146,7 @@ rm ~/.agent-mail/supervisor-watchdog ~/.agent-mail/registry.py
 | `hooks/shard-guard.py` | PreToolUse hook（分片写入守卫，v3） |
 | `hooks/registry.py` | 发现层助手（registry.json 的 fcntl 互斥写，v3，安装到 ~/.agent-mail） |
 | `watchdog.sh` | 外部逾期巡检脚本（v3 分片遍历 + UDS 直投） |
-| `test_stopfailure.sh` | hook 回归测试（v3 扩展，58 项断言） |
+| `test_stopfailure.sh` | hook 回归测试（v3 扩展，64 项断言） |
 | `test_watchdog.sh` | watchdog 回归测试（v3 扩展，30 项断言） |
 | `specs/2026-09-05-scheduled-supervision/` | v2 spec/plan + 定时任务机制实测记录（claude_cron.md） |
 | `specs/2026-09-06-multi-supervisor/` | v3 spec/plan（多 supervisor 并存） |

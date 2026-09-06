@@ -193,6 +193,10 @@ try:
         sys.exit(1)
 
     already = {}
+    if "hooks" in cfg and not isinstance(cfg["hooks"], dict):
+        print("  ERROR: hooks section of %s is not an object; aborting."
+              % settings, file=sys.stderr)
+        sys.exit(1)
     for event, matcher, idx in HOOK_REGISTRATIONS:
         script = hook_scripts[idx]
         command = "python3 %s" % shlex.quote(script)

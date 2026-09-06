@@ -315,10 +315,11 @@ def resolve_supervisor(sessions, st, n_shards=0):
             return info(cands[0])
 
     # pass 2: name match AND session cwd is the supervised project dir.
-    # Disabled once the project has multiple shards: with several
-    # supervisors around, a name+cwd collision is exactly the mis-route
-    # this guard exists to prevent.
-    if n_shards > 1:
+    # Disabled as soon as ANY shard exists (n_shards >= 1): the v2-upgrade
+    # window (flat v2 ledger + one v3 shard) is exactly the case where the
+    # dead v2 supervisor's same-name same-cwd v3 successor would receive a
+    # misdelivered interrupt from a v2 worker.
+    if n_shards >= 1:
         return None
     cands = [o for o in sessions
              if o.get("name") == want_name and live(o)

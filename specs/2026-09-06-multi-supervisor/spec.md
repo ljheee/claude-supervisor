@@ -121,7 +121,7 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 
 - `find_state_upward` 改造：向上找到 `.supervisor/` 后，**优先扫描分片**（UUID 目录名白名单，archive/ 与非 UUID 目录不可见）；无分片时回退平铺 state.json。**分片集合存在但 stdin sid 零命中时，追加一次平铺 workers[] 精确匹配（CR3 P1-3 升级窗口兼容）**——命中则按平铺流程投递（v2 存量轮次的中断直投不因首个 v3 分片出现而静默丢失），未命中维持不投递不落盘（宁漏勿错投）。
 - 分片选择规则：hook 从 **stdin JSON 的 session_id**（dev-0 已实测定案）匹配分片的 `workers[].session_id`；worker sid 命中多个**活跃分片**时（同一 worker 会话先后注册进两个 supervisor 的形态），取 `registered_at` 最新者（现役队伍优先），仍不唯一 → 不投递不落盘，stderr 记一行（宁漏勿错投——错投会污染他方 acknowledged 账）。归档分片因 UUID 白名单不可见，不会进入命中集合（P0-1 白名单与多命中消歧协同生效）。
-- `resolve_supervisor` pass-2（name+cwd 回退）收紧：**分片数 > 1 时禁用 pass-2**，仅允许 supervisor_session_id 精确匹配——否则目标 supervisor 已死时，同目录同名同 cwd 的他方 supervisor 会收到不属于自己队伍的干扰消息（补课机制可兜后果，但投递语义已错）。
+- `resolve_supervisor` pass-2（name+cwd 回退）收紧：**存在任一分片（分片数 ≥ 1）时禁用 pass-2**，仅允许 supervisor_session_id 精确匹配——否则目标 supervisor 已死时，同目录同名同 cwd 的他方 supervisor 会收到不属于自己队伍的干扰消息（补课机制可兜后果，但投递语义已错）。实施 CR 修正：原实现写成分片数 > 1，漏掉了 v2→v3 升级窗口（平铺 v2 账本 + 恰好 1 个 v3 分片共存）——此时 v2 supervisor 已死、同名 v3 supervisor 存活，v2 worker 的中断会被错投；纯 v2 零分片场景保留 pass-2 兼容（回归用例 case18b 覆盖）。
 - interrupts.jsonl 写入路径随选中分片（`.supervisor/<sid>/interrupts.jsonl`）。
 - **worktree 支持**：worker 工作在 linked worktree 时，向上找不到 `.supervisor/`——用 `git rev-parse --git-common-dir` 定位主工作区根，再在主工作区根下找 `.supervisor/`（确定性命令，不做目录猜测）。
 - 回归测试 test_stopfailure.sh 扩展用例：多分片定向投递 / 多分片无匹配（含双命中歧义）不投递 / 平铺回退（零分片时）/ worktree 发现 / **archive 不被扫描** / **双 supervisor 名字碰撞且目标 sid 死 → 不投递（pass-2 禁用）**；新增两 hook 各自用例：注入器（startup/resume 两种 source 输出、异常静默 exit 0）、守卫（正确分片放行 / 错 sid deny + stderr 含正确 sid / 短路路径零 JSON 解析 / archive 与平铺写入放行）。

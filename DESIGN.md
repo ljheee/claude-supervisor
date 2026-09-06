@@ -260,10 +260,10 @@ supervisor 收到 WORKER INTERRUPTED 后：
 
 ## 10. 测试策略
 
-`test_stopfailure.sh`（22 项断言）与 `test_watchdog.sh`（15 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端/假 agent-mail CLI），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
+`test_stopfailure.sh`（64 项断言）与 `test_watchdog.sh`（30 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端/假 agent-mail CLI），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
 
-- hook：正常投递（auth+user 帧、kind 分类、phase、session_id 落账）、陌生人会话/空 workers/done 项目/无 state 目录的零误伤、子目录 cwd 向上寻址、socket 存在但拒连（真 connect 失败分支）、key 缺失的 auth 降级、畸形 stdin、非字符串 error_details、同名 supervisor 诱饵不被选中；
-- watchdog：逾期告警（含 session_id）、同静默级别去重、`last_instruction_ts` 不抑制告警、新鲜 worker/最近响应/done 项目静默、非法阈值/目录/损坏 state/workers 非列表的静默退出、梯度升级、RFC3339 Z 时间戳解析。
+- hook：正常投递（auth+user 帧、kind 分类、phase、session_id 落账）、陌生人会话/空 workers/done 项目/无 state 目录的零误伤、子目录 cwd 向上寻址、socket 存在但拒连（真 connect 失败分支）、key 缺失的 auth 降级、畸形 stdin、非字符串 error_details、同名 supervisor 诱饵不被选中；v3 增量：多分片定向投递/零命中与双命中歧义不投递、平铺回退与升级窗口（case18b：1 分片 + v2 平铺共存时 pass-2 禁用不错投）、worktree 发现、archive 不可见、分片守卫（拦 registry 直写/错 sid deny/短路放行）、身份注入器（startup/resume/垃圾静默）；
+- watchdog：逾期告警（含 session_id）、同静默级别去重、`last_instruction_ts` 不抑制告警、新鲜 worker/最近响应/done 项目静默、非法阈值/目录/损坏 state/workers 非列表的静默退出、梯度升级、RFC3339 Z 时间戳解析；v3 增量：分片遍历与平铺回退、多分片独立告警与去重互不干扰、UDS 直投按 supervisor_session_id 定向、archive 不可见。
 
 测试数据的一个教训值得记录：给本地 naive 时间戳硬加 `Z` 后缀会把它变成"未来时间"（UTC 解析比本地墙钟早 8 小时），导致静默值为负、永不告警——测试用例 K 用真正的 UTC 过去时间戳单独覆盖 Z 解析路径。
 
