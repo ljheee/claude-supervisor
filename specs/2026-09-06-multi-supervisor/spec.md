@@ -148,7 +148,7 @@ v2 + rework 后的架构是**单 Supervisor 世界**：一个 project-dir 一份
 2. 双 supervisor 冒烟实测：同一 project-dir 起 greenfield + rework 两个 supervisor，worker 双双注册路由正确、账本互不可见、**各自终端的 CronList 各见且仅见本方一条 UUID 标识巡检、互不可见（隔离本身就是证据——实测 session-only cron 不跨会话可见，CR2 P1-1）**、一方收尾注销后 registry 只剩另一方；**registry 并发首建竞态合成测试**（两进程并发 register，验证锁串行化无条目丢失/重复）；**workers[].session_id 为真 UUID 且 hook 可命中的验证**（CR2 P0-1 的下游检查）。
 3. 旧布局迁移实测：放置平铺 state.json 后启动，走归档询问分支，归档后旧数据可读、新分片干净，且归档目录对 hook/watchdog 均不可见（archive 隔离验证）。
 4. worktree 实测：worker 在 linked worktree 中触发 StopFailure，hook 经 git-common-dir 找到主工作区账本并正确投递所属分片。
-5. 零回归 diff 门禁：core 协议改造后的拼接产物与改造前 diff 逐条归类，语义条款除八类允许项（账本路径换根；registry 注册/心跳/注销/stale 条款；cron 查重标识改写；旧布局迁移条款；resume 恢复、会话名固定与 worker 身份登记（自报 sid 主 + 扫描 fallback）的新增条款；存量措辞修正四处——前缀→精确匹配、按会话寻址→按名称寻址、name 仅供展示补路由硬依赖、ListAgents 推导 sid→SessionStart 注入行（主）/sessions 注册表扫描（fallback）；注册前置（先于分片/cron 创建）的顺序调整；WORKER REGISTER 消息格式增自报 sid 一行）外零丢失零弱化——与 plan dev-1 步骤 9 逐字对齐。
+5. 零回归 diff 门禁：core 协议改造后的拼接产物与改造前 diff 逐条归类，语义条款除八类允许项（账本路径换根；registry 注册/心跳/注销/stale 条款；cron 查重标识改写；旧布局迁移条款；resume 恢复、会话名固定与 worker 身份登记（自报 sid 主 + 扫描 fallback）的新增条款；存量措辞修正五处——前缀→精确匹配、按会话寻址→按名称寻址、name 仅供展示补路由硬依赖、ListAgents 推导 sid→SessionStart 注入行（主）/sessions 注册表扫描（fallback）、watchdog 投递 agent-mail→消息通道直投（随 F5 联动）；注册前置（先于分片/cron 创建）的顺序调整；WORKER REGISTER 消息格式增自报 sid 一行）外零丢失零弱化——与 plan dev-1 步骤 9 逐字对齐。
 
 ## 7. 风险对冲
 

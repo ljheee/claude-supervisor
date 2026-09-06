@@ -66,14 +66,36 @@
 6. 收尾（状态机 dev-N 第 4 条）：CronDelete 同时从 registry 注销自己（registry.py unregister）。
 7. `interrupts.jsonl`/`acknowledged.jsonl` 全部路径引用改分片路径（grep 逐处核对：中断补课条含两文件、落账条款 acknowledged 一处——以 grep DoD 为准，不依赖计数）。
 8. 顺手修存量漂移四处：启动步骤 2 "hook 靠 supervisor_session_id 前缀匹配"改"精确匹配"（CR P2-1）；"唤醒 worker 用 SendMessage 按会话寻址"改"按名称寻址（SendMessage 唯一可用键，dev-0 实测）"；"name 仅供展示"补"但它是消息路由的硬依赖"；启动步骤 7 "用 ListAgents 解析发送方会话，取得其 session_id"改"worker 自报 sid（SessionStart 注入行，实测⑦）为主"（CR2 P0-1，此项已提升为步骤 3 专项）。
-9. 拼接门禁：`cat` 两模式层 + 新 core，与 v3 前拼接产物 diff——允许项仅限八类（与 spec DoD 5 一致）：路径换根、registry 注册心跳注销 stale 各一句、cron 标识改写、旧布局迁移条款、resume 恢复（双通道触发）与名称固定与 worker 登记（自报主+扫描 fallback）改造新增条款、WORKER REGISTER 模板增自报 sid 一行、存量措辞修正四处（含 ListAgents 推导 sid→注入行为主/扫描 fallback）、注册前置于分片/cron 的顺序调整。逐条归类，语义条款零丢失零弱化（沿用零回归 diff 门禁方法学）。
+9. 拼接门禁：`cat` 两模式层 + 新 core，与 v3 前拼接产物 diff——允许项仅限八类（与 spec DoD 5 一致）：路径换根、registry 注册心跳注销 stale 各一句、cron 标识改写、旧布局迁移条款、resume 恢复（双通道触发）与名称固定与 worker 登记（自报主+扫描 fallback）改造新增条款、WORKER REGISTER 模板增自报 sid 一行、存量措辞修正五处（含 ListAgents 推导 sid→注入行为主/扫描 fallback、watchdog agent-mail→直投随 F5 联动）、注册前置于分片/cron 的顺序调整。逐条归类，语义条款零丢失零弱化（沿用零回归 diff 门禁方法学）。
 
 ### DoD
 
-- [ ] diff 归类清单落本 plan 附录（每条：所属允许类 / 语义等价说明）
+- [ ] diff 归类清单落本 plan 附录（每条：所属允许类 / 语义等价说明）——已随 dev-1 完成落附录 A
 - [ ] grep 核对：全文无残留平铺路径引用（`\.supervisor/state.json`、`\.supervisor/interrupts` 旧形态；**旧布局迁移条款本身必需的平铺路径字样豁免——按行含"归档/迁移/平铺"关键词排除，CR3 P2-2**）
 - [ ] grep 核对：registry.py 调用条款（register/heartbeat/unregister/mark-stale 四时机）、stale 判定（双条件）、"绝不删他人条目"在 core 中均为命令式表述；core 明文禁止 LLM 直接编辑 registry.json；**调用写法均为绝对路径 `~/.agent-mail/registry.py ...`（无裸 registry.py，CR3 P2-4）**
 - [ ] grep 核对：`"启动步骤第"` 交叉引用逐条与新编号一致（CR3 P1-2）
+
+### 附录 A：dev-1 diff 归类清单（2026-09-04，拼接产物 diff 逐条）
+
+| # | diff 位置 | 归类（允许项） | 语义等价说明 |
+|---|---|---|---|
+| 1 | 核心原则 4（name 仅供展示→路由键） | 存量措辞修正三 | 实测后表述精化，无行为变化 |
+| 2 | 启动步骤 2 整段重写 | 新增条款（会话名固定+sid 注入行+resume 恢复） | 旧 sid 获取法（ListAgents 推导）已被实测推翻，语义替代而非弱化 |
+| 3 | 启动步骤 3 新增 | 新增条款（旧布局迁移） | v2 兼容新增，存量语义无 |
+| 4 | 启动步骤 4 新增 | registry 注册条款 | 新增多 supervisor 机制 |
+| 5 | 启动步骤 3/4→5 合并改写 | 路径换根 | state.json 路径改分片，读写语义不变 |
+| 6 | 启动步骤 5→6 | 无语义变化 | 仅编号顺延 |
+| 7 | 启动步骤 6→7 | cron 标识改写 + 注册前置顺序 | 查重标识增 UUID；prompt 增首条自检（resume 触发兑底） |
+| 8 | 启动步骤 7→8 | worker 登记改造（自报 sid 主+扫描 fallback） | 旧法（ListAgents 解析）已被实测推翻 |
+| 9 | 状态存储节开头 + schema 注释 + channel 字段 | 路径换根 + worker 登记改造 | 分片路径；workers[].session_id 来源改自报+交叉验证 |
+| 10 | 身份主键条款 | 存量措辞修正二 | 按会话寻址→按名称寻址，补 name 路由键定位 |
+| 11 | 原子写示例路径 | 路径换根 | tmp 文件名改相对形态（同目录语义不变） |
+| 12 | 第三层巡检引言 | registry 心跳/stale 条款 + 编号顺延 | 新增维护动作；"第 6 步→第 7 步"交叉引用改写 |
+| 13 | 中断补课/落账两处路径 | 路径换根 | 分片路径 |
+| 14 | 第四层 watchdog + WATCHDOG ALERT 两处 | 存量措辞修正五 | agent-mail→消息通道直投（随 F5 联动） |
+| 15 | 状态机第 4 条收尾 | registry 注销条款 | 新增注销动作 |
+
+旧启动步骤 2 中的"前缀匹配"表述随整段重写消失（存量措辞修正一）；全部 diff 落在八类允许项内，语义条款零丢失零弱化。
 
 ---
 
