@@ -1,7 +1,7 @@
 # Plan: claude-supervisor v3 多 Supervisor 并存实施
 
 > 依据：`spec.md`（同目录）
-> 原则：core 协议语义零弱化（账本路径换根 + 三处新增局部条款）；hook/watchdog 首次进入改动面（v3 spec 明确扩边界），每处改动配回归用例；全部新机制先实测后依赖（dev-0 沿用 rework 的前置实测纪律）。
+> 原则：core 协议语义零弱化（账本路径换根 + 新增局部条款：名称固定/sid 获取/resume 恢复/registry 四命令/cron 标识）；hook/watchdog 首次进入改动面（v3 spec 明确扩边界），每处改动配回归用例；全部新机制先实测后依赖（dev-0 沿用 rework 的前置实测纪律，六项已闭环）。
 
 ## Phase 划分总览
 
@@ -26,7 +26,7 @@
 ### 实测项
 
 1. **CronList 跨会话可见性**（F2 cron 查重修复的前提）：起两个 Claude Code 会话，A 建 cron 后 B CronList——B 能否看到 A 的任务？prompt 内容是否完整可见？（查重键形态已定案完整 UUID，本项只回答可见性与归属信息有无。）
-2. **SendMessage 按 session_id 并发寻址**（F3 路由前提）：两个 supervisor 会话并存，worker 分别按两个 sid 发消息，验证各达各的收件箱、无串扰、无广播。
+2. **SendMessage 寻址机制**（F3 路由前提）：两个会话并存，验证 SendMessage 的可用寻址键（原计划按 session_id，实测推翻——回炉为名称寻址验证）。
 3. **worktree 下 hook 的 cwd 与 git 定位**（F4 前提）：linked worktree 中跑 `git rev-parse --git-common-dir`，确认输出主工作区 gitdir 且可推导主工作区根；确认 hook 在 worktree 中触发时的工作目录就是 worker cwd。
 4. **hook stdin 的 session_id 可用性**（F4 分片选择的身份来源）【已实测通过，2026-09-06】：探针 hook（项目级 settings.json，Stop 事件 cat stdin 落盘）+ `claude -p` 实测——stdin JSON 确含 `session_id` 字段，36 位 UUID 格式，与 transcript_path 首行 sessionId 及 projects 目录名三方一致。额外可用字段：`prompt_id`（可作 worker 回合标识）、`cwd`、`transcript_path`。F4 身份源定案：hook stdin session_id。
 5. **flock 可用性**（F1 前提）：macOS 无原生 /usr/bin/flock（CR 实测确认，仅 shlock）——定案方案已改为 registry.py 助手脚本（python fcntl），本项实测 registry.py 原型：fcntl 持锁读-改-写 + 锁超时语义 + 并发首建（两进程同时 register 无丢失/重复）；四个子命令（register/heartbeat/unregister/mark-stale，作者终审补充）逐一验证。
@@ -46,7 +46,7 @@
 - [x] 六项实测结论已回填（含两项推翻设计假设的发现：SendMessage 名称寻址、ListAgents 无 UUID）
 - [x] registry.py 原型锁语义定案；resume sid 结论定案（成立，附名字重分配的补偿设计）
 - [x] 实测产生的临时会话/文件已清理（测试会话已退出，/tmp 产物已删）
-- [ ] spec 实测驱动修订已落地（F1/F2/F3 三处，随本次提交）
+- [x] spec 实测驱动修订已落地（F1/F2/F3 三处 + 复审补修：F4 归档多命中逻辑矛盾、F1 活性检查改按 name、零回归允许项扩六类）
 
 ---
 
@@ -60,8 +60,8 @@
 4. 巡检步骤：新增 heartbeat_ts 更新（registry.py heartbeat，仅自己条目）。
 5. 收尾（状态机 dev-N 第 4 条）：CronDelete 同时从 registry 注销自己（registry.py unregister）。
 6. `interrupts.jsonl`/`acknowledged.jsonl` 全部路径引用改分片路径（grep 逐处核对：中断补课条含两文件、落账条款 acknowledged 一处——以 grep DoD 为准，不依赖计数）。
-7. 顺手修存量漂移：启动步骤 2 "hook 靠 supervisor_session_id 前缀匹配"改"精确匹配"（CR P2-1，实际代码是等值匹配）。
-8. 拼接门禁：`cat` 两模式层 + 新 core，与 v3 前拼接产物 diff——允许项仅限：路径换根（`<project-dir>/.supervisor/` → 分片路径）、启动步骤新增注册事务条款、cron 标识改写、心跳/注销各一句、旧布局迁移条款、前缀→精确匹配措辞修正。逐条归类，语义条款零丢失零弱化（沿用零回归 diff 门禁方法学）。
+7. 顺手修存量漂移三处：启动步骤 2 "hook 靠 supervisor_session_id 前缀匹配"改"精确匹配"（CR P2-1）；第 81 行"唤醒 worker 用 SendMessage 按会话寻址"改"按名称寻址（SendMessage 唯一可用键，dev-0 实测）"；"name 仅供展示"补"但它是消息路由的硬依赖（SendMessage 唯一可用键）"。
+8. 拼接门禁：`cat` 两模式层 + 新 core，与 v3 前拼接产物 diff——允许项仅限六类（与 spec DoD 5 一致）：路径换根、registry 注册心跳注销各一句、cron 标识改写、旧布局迁移条款、resume 恢复与名称固定新增条款、存量措辞修正三处。逐条归类，语义条款零丢失零弱化（沿用零回归 diff 门禁方法学）。
 
 ### DoD
 
@@ -93,7 +93,7 @@
 ### 步骤
 
 1. `find_state_upward` 改造：`.supervisor/` 存在时先扫分片（**UUID 目录名白名单**，archive/ 与非 UUID 目录不可见，CR P0-1）；零分片回退平铺。返回 (state_dict, shard_dir) 二元组。
-2. 分片选择：用 dev-0 实测定案的身份源（hook stdin 的 session_id）匹配分片的 `workers[].session_id`；sid 多命中时取非归档且 registered_at 最新，仍不唯一不投递（CR P0-1）。
+2. 分片选择：用 dev-0 实测定案的身份源（hook stdin 的 session_id）匹配分片的 `workers[].session_id`；sid 命中多个**活跃分片**（同 worker 先后注册进两个 supervisor 的形态）时取 registered_at 最新，仍不唯一不投递（归档分片因 UUID 白名单不可见，不进命中集合——复审补修：原"归档多命中"场景与白名单矛盾）。
 3. `resolve_supervisor` pass-2 收紧：分片数 > 1 时禁用 pass-2，仅 supervisor_session_id 精确匹配（CR P1-4）。
 4. worktree：向上找不到 `.supervisor/` 时，`git rev-parse --git-common-dir` 推主工作区根再找（仅当 start_dir 在 git 仓库内）。
 5. interrupts.jsonl 落盘路径随选中分片。
