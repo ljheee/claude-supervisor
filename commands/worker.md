@@ -94,7 +94,11 @@ Phase: <当前 phase>
 
 等待指示，不要静默死磕，也不要自行放弃任务。
 
-**你无法预见的中断**（429 限流、网络断、进程被杀、用户手动 Esc）：这些会直接掐断你的回合，你没有机会发任何消息。若已安装 claude-supervisor 的 StopFailure hook，环境会替你自动向 Supervisor 上报 `WORKER INTERRUPTED`，无需你做任何事；Supervisor 退避约 5 分钟后会发消息唤醒你——**收到“继续执行 Phase N”类唤醒指令时，先 `git log`/`git status` 对齐中断点，然后从中断处接着干**。若进程被杀，恢复方式是用户 resume 你的会话（`claude --resume` / `codex resume`）。**恢复后你的第一件事**：检查 `git status` 与 `git log`，然后向 Supervisor 上报：
+**你无法预见的中断**（429 限流、网络断、进程被杀、用户手动 Esc）：这些会直接掐断你的回合，你没有机会发任何消息。若已安装 claude-supervisor 的 StopFailure hook，环境会替你自动向 Supervisor 上报 `WORKER INTERRUPTED`，无需你做任何事；Supervisor 退避约 5 分钟后会发消息唤醒你——**收到"继续执行 Phase N"类唤醒指令时，先 `git log`/`git status` 对齐中断点，然后从中断处接着干**。若进程被杀，恢复方式是用户 resume 你的会话（`claude --resume` / `codex resume`）。
+
+**模型层异常后的唤醒（你的回合"正常结束"但产出为空/"…"）**：若已安装 Stop hook（stop-anomaly-capture），这种形态也会被自动上报，Supervisor 会来探活唤醒你。**收到任何唤醒/探活消息时，若你发现自己上一回合的实际产出是空文本、单个 "…"、或叙述了动作但工具从未执行（上文有此痕迹），你的第一动作是发 WORKER STATUS 报告真实中断点**（上个已 commit 的锚点 + 当时正在做什么），而不是直接继续干活——上一个回合可能"干了活没收尾"或"根本没干活"，先对齐再续。这一条是加速恢复用的；检测本身不依赖你的自觉（hook 机械上报）。
+
+**恢复后你的第一件事**：检查 `git status` 与 `git log`，然后向 Supervisor 上报：
 
 ```
 WORKER RESUME
@@ -111,7 +115,7 @@ Phase: <中断时所处的 phase>
 多个 worker 是同一仓库的不同会话，**共享同一个工作区**，未提交的改动会互相覆盖：
 
 - 开工前从 supervisor 的初始指令里确认自己的 scope，**只改 scope 内的文件**。
-- 每完成一个 Phase 必须立即 commit（消息注明 `worker: <你的名>, phase: dev-N`），**只提交 scope 内且属于本 Phase 的文件**（明确 `git add <文件>`，禁止 `git add -A`/`git add .`，避免裹挟用户或其他 worker 的未提交改动）；不要跨 Phase 囤积未提交改动，你的未提交改动就是其他 worker 的地雷。
+- 每完成一个 Phase 必须立即 commit（消息注明 `worker: <你的名>, phase: dev-N`），**只提交 scope 内且属于本 Phase 的文件**（明确 `git add <文件>`，禁止 `git add -A`/`git add .`，避免裹挟用户或其他 worker 的未提交改动）；不要跨 Phase 囤积未提交改动，你的未提交改动就是其他 worker 的地雷。trailer 里的 `<你的名>` **必须是你注册时自报的名字**——不要从 `git log` 里抄上一轮 worker 的旧模板（2026-09-08 polish 轮实证：新 worker 抄旧 trailer 导致 9 个 commit 全部署错名字，考古时会被误导到旧会话）。
 - `.supervisor/` 目录是监工的账本：整体**永不 add**（账本不进 git）；registry.json 与各分片目录（`<sid>/`）对 worker **只读**，分片内容禁碰。
 - 若 supervisor 为你指定了独立分支或 worktree，在指定分支/worktree 上工作；否则默认在同一分支上靠 commit 纪律 + scope 隔离。
 - 发现其他 worker 的改动与你的冲突（同文件、同函数），不要直接改掉，上报 supervisor 仲裁。

@@ -160,6 +160,23 @@ supervisor v1 无法定时醒来，v2 起有 10 分钟巡检 cron（见第 11 �
 
 `hooks/worker-stopfailure.py`，注册于 `settings.json` 的 `hooks.StopFailure`。
 
+### 5.0 Stop 异常捕获 hook（stop-anomaly-capture.py，v3.2 新增）
+
+`hooks/stop-anomaly-capture.py`，注册于 `hooks.Stop`（每回合结束都触发，与既有用户
+Stop hook 并存叠加）。判据与分级投递规则见 stop-anomaly.md（事故 transcript replay
+实证）：model-error（末条 assistant `model=="error"`）与 empty-turn:tail（末条零
+tool_use + 空/"…" 文本，尾部退化）单发即投递；empty-turn:full（整轮空）连击 ≥2 才
+投递。**性能门**：resolve_ledger 走纯目录上溯（`git_fallback=False`，不 spawn git）
+在尾扫之后、git fallback 之前判定——健康回合（受监与否、是否在 git 仓库内）零 git
+spawn、零状态写、零投递；未受监工会话每回合只付 stdin 读 + 目录上溯 + 一次有界
+尾扫（64KB 起步、毫秒级；尾扫不可省——正是回合分类在决定要不要付罕见的 git
+spawn）；git rev-parse fallback 只在异常回合的 worktree 场景才付（罕见路径）。
+`resolve_supervisor` 刻意不做 name fallback：sid 缺失时只落盘 interrupts.jsonl
+走 catch-up，不做活投递（name-only 命中恰是 v3 要防的误投向量）。连击计数在
+分片 `anomaly_state.json`（单写者原子写，绝不与 watchdog_state.json 共文件）；
+已知边界：读-改-写跨进程存在丢失更新窗口——两个 worker 同时异常时 streak 可能
+少数一次，后果仅是多抑制一回合（full 需连击 ≥2 的路径），可接受不修。
+
 ### 5.1 身份判定
 
 见 3.1。判定链（全通过才投递）：
@@ -218,6 +235,7 @@ supervisor 收到 WORKER INTERRUPTED 后：
 - **macOS 通知**：通知文本经 `osascript` 的 `on run argv` 传参，**永不**拼进 AppleScript 源码——worker 名来自 state.json，是不可信输入（P0-3 修复）。
 - **agent-mail 调用**：参数数组式 subprocess，无 shell 拼接。
 - **永远 exit 0**：shell 层 `trap 'exit 0' EXIT` + python 层 `2>/dev/null || exit 0`，cron 永远收不到错误输出。
+- **v3.1 supervisor 自检（第五层）**：per-ledger 循环开头（done 跳过后、worker overdue 判定前——零 worker 分片也走得到）读 `.supervisor/registry.json` 本分片 supervisor 的 `heartbeat_ts`：停更超过阈值且会话 socket 不存在 → **DEAD**（osascript 桌面通知引导用户 `claude --resume`）；停更但 socket 仍在 → **DEGRADED**（疑似模型劣化，请求人工介入；通知文本含 kill -9 残留 socket 的兜底指引）。socket 探活遍历全部同 sid 记录、任一活即 alive（与 worker 路由同姿势，防 resume 残留死记录把活 supervisor 误判 DEAD）。通知直投用户而非 supervisor UDS（病人不能给自己叫医生）。去重与 worker 梯度共用分片 `watchdog_state.json`（key `supervisor:<sid>`，basis=心跳 ISO 时间，心跳前移即重置；多分片各自独立去重，case U 实测隔离）。心跳刷新由 supervisor 巡检协议承载（每轮顺带 `registry.py heartbeat`，协议要求 `--project-dir` 必传——漏传会按 CWD 读错 registry、心跳刷不进真文件 → 假 DEAD），watchdog 只读不写 registry。cron 注册/移除由 supervisor 启动协议步骤 7b 与收尾步骤承载（标识注释行 + 条目行成对操作，幂等；先落临时文件再 `crontab "$TMPF"` 装回，防管道中断丢整份 crontab；移除前先查 registry 同项目他人活跃条目——多 supervisor 并存时 A 收尾不拆 B 还在用的 cron）。已知边界：①心跳只在巡检时刷新、cron tick 等当前回合结束才注入——超过阈值的长回合会产生一次假 DEGRADED（梯度去重封顶一次，可忽略）；②kill -9 崩溃残留 socket 文件时真 DEAD 会被分诊为 DEGRADED（兜底指引已引导用户按 DEAD 处理）。
 
 ## 7. 数据文件与并发纪律
 
@@ -310,7 +328,7 @@ v2 之后 /supervisor 协议对绿地项目（从零开发）高度适配，但�
 
 模式层与 core 在 install.sh 安装期 cat 拼接成单一命令文件。选拼接而非 @ 引用的理由与本套件一贯哲学一致（能硬不软，§9.5 对冲策略第一条）：拼接发生在安装期，可 grep 断言、可 diff 审查；拼接产物带三重结构断言（frontmatter 唯一性——第二个 `---` 后的水平线不误判；五个关键节齐全；无重复二级标题——模式层章节不得与 core 撞名），断言失败备份中止、不留半成品。**dev-0 实测的两个关键结论**：拼接产物可被 Claude Code 正常加载为 slash command（方案 B 前提成立）；**下划线前缀文件也会被注册为命令**（实测推翻预期）——因此 `_core-supervisor.md` 绝不能放进 `~/.claude/commands/`（会变成可误触的伪命令），原料副本只装 `~/.claude/hooks/claude-supervisor/`。
 
-零回归保障：拆分是纯重构，拼接产物与拆分前 supervisor.md 的 diff 仅允许模式声明节新增、章节顺序重排、三处绿地特化措辞参数化（启动步骤 7 首阶段指令整句 / phase 枚举 / schema 示例——参数由模式层声明，rework 下由 supervisor 初始指令下发本模式枚举覆盖 worker.md 的绿地默认值）。dev-1 门禁实测：removed 24 条 = 纯移位 20 + 允许改写 4，零条款丢失。
+零回归保障：拆分是纯重构，拼接产物与拆分前 supervisor.md 的 diff 仅允许模式声明节新增、章节顺序重排、三处绿地特化措辞参数化（启动步骤 7 首阶段指令整句——时点注记：拆分时是步骤 7，v3 插入 cron 步骤后现行 core 中顺延为步骤 8 / phase 枚举 / schema 示例——参数由模式层声明，rework 下由 supervisor 初始指令下发本模式枚举覆盖 worker.md 的绿地默认值）。dev-1 门禁实测：removed 24 条 = 纯移位 20 + 允许改写 4，零条款丢失。
 
 ### 12.3 rework 的考古四件套与安全网
 
@@ -328,7 +346,9 @@ state.json 可选顶层字段，生命周期：archaeology 产出初稿 → safe
 
 ### 12.6 注入体积预算
 
-协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行（实施 CR 后实测）、core 169 行（拆分时实测）。拼接产物：绿地 208 行（原 197，增量全在模式声明节）、rework 237 行（实施 CR P1-1 内联化后）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。v3 增量实测：core 169→173 行（+4，含分片路径换根、注册事务、cron 标识、worker 自报 sid 条款），worker 119→124 行（+5，registry 四分支发现 + worktree 兑底 + 三选项死条目处置 + 自报 sid 行）；均在零回归 diff 门禁的八类允许项内逐条归类（见 specs/2026-09-06-multi-supervisor/plan.md 附录 A）。
+协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行、research 模式层 51 行、core 194 行、worker 128 行（2026-09-09 双路 CR 后实测——行数表此前五个数全过期，教训：改完必须 wc -l 再写数）。拼接产物：绿地 233 行、rework 262 行、research 245 行（同日实测）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。research 同样以引用为主（时间盒/对账/抽查复现均引用 core 机械回放纪律），新增的 worker-facing 下发条款因 worker 读不到模式层而必须自包含。
+
+**research 模式（2026-09-09，第三模式）**：rework spec §3 非目标明留的接口。设计依据 specs/2026-09-09-research-mode/spec.md，核心差异四条：产出是报告不是代码（验收锚点换成编号问题清单逐问对账）；产品代码只读红线（git diff 文件集 ⊆ `--out` 报告目录，越界 REFINE——复用 rework 范围比对的姿势）；证据五级分级 A-E + 监工抽查复现 A-C 级关键证据（伪证一条整章 REFINE，延续机械回放纪律）；非 git 目录允许（与 rework 的 git 断言相反，落盘即交付）。状态机 `scope → survey → dev-N`（每章一单元，单章 90 分钟时间盒防无限展开）。零代码改动：纯新增模式层 + install.sh 一行拼接注册，拼接结构断言对其生效。
 
 ## 13. 多 Supervisor 并存（v3）
 
