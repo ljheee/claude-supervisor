@@ -14,8 +14,8 @@ argument-hint: <调研目标> [--project-dir DIR] [--out <报告目录>]
 - 首阶段指令全文：**进入 Phase 0 问题定义，产出编号问题清单（每问附验收标准）、调研边界（明确不回答什么）、报告产出路径建议，按 WORKER REPORT 模板上报**。
 - registry 注册时 `--mode research`。
 - `--out <报告目录>`：报告与探针产物的落盘目录。显式传参时启动即校验（父链存在或可 `mkdir -p` 创建，不可写 ESCALATE）；**缺省时启动只校验 `<project-dir>/docs/research/` 可创建**——完整路径的 `<日期-主题>` 主题词要 scope 定题后才确定，由你在 scope APPROVE 后定题回填完整路径，并在首个 dev 指令中显式下发给 worker（worker 不自己猜落盘位置）。
-- **worker-facing 约束统一下发**（worker 只读 worker.md，读不到本模式层——与 rework 下发 frozen 清单同构的机制）：初始指令除 core 必含项外，必须完整下发五项：①`--out` 最终路径与「探针/产物只落此处或系统临时目录」；②产品代码只读红线与免责通道；③证据五级分级定义（A 一手实测/B 源码定位/C 官方文档/D 二手转述/E 显式推测）与「每章上报必附结论+证据链+置信度」格式；④非 git 目录跳过 commit 的覆盖声明（git 仓库内 trailer 照 `phase: dev-N`）；⑤单章时间盒 90 分钟与**超时中间上报义务**（超时必须上报中间结论+缺口清单——显式覆盖 worker「不干完里程碑不上报」的默认纪律）。
-- 非 git 目录**允许**（调研不硬依赖历史——与 rework 的 git 断言相反的显式差异）：在 git 仓库内则报告/探针照 commit 纪律（trailer `phase: dev-N`）；非 git 目录跳过 commit，落盘即交付，**中断对齐锚改用 `--out` 最新落盘产物**（文件清单+mtime）——resume 唤醒后先对齐最新落盘再续查，替代 git 锚。
+- **worker-facing 约束统一下发**（worker 只读 worker.md，读不到本模式层——与 rework 下发 frozen 清单同构的机制）：初始指令除 core 必含项外，必须完整下发五项：①`--out` 最终路径与「探针/产物只落此处或系统临时目录」；②产品代码只读红线与免责通道；③证据五级分级定义（A 一手实测/B 源码定位/C 官方文档/D 二手转述/E 显式推测）与「每章上报必附结论+证据链+置信度」格式；④非 git 目录跳过 commit 的覆盖声明（git 仓库内 trailer 照 `worker: <你的名>, phase: dev-N`——worker 署名不可省，防从 git log 抄旧模板/无名 commit）；⑤单章时间盒 90 分钟与**超时中间上报义务**（超时必须上报中间结论+缺口清单——显式覆盖 worker「不干完里程碑不上报」的默认纪律）。
+- 非 git 目录**允许**（调研不硬依赖历史——与 rework 的 git 断言相反的显式差异）：在 git 仓库内则报告/探针照 commit 纪律（trailer `worker: <你的名>, phase: dev-N`）；非 git 目录跳过 commit，落盘即交付，**中断对齐锚改用 `--out` 最新落盘产物**（文件清单+mtime）——resume 唤醒后先对齐最新落盘再续查，替代 git 锚。
 - 长阶段时限：survey 与单章 dev 的失联判定时限默认 120 分钟（下发指令时与 worker 显式约定）。
 
 ## 前置阶段（research）

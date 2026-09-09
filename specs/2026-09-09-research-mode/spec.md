@@ -30,7 +30,7 @@ v3 核心资产（身份/账本/四层中断防御/巡检/watchdog/OODA/三层�
 ## 4. 设计决策
 
 - **状态机**：`scope → survey → dev-N`。scope 对应绿地 clarify 的位置（把模糊调研目标挖成可验收问题清单）；survey 对应 plan 的位置（章节划分=dev 单元，信息源清单+时间盒）；dev-N = 每章一个调研执行单元。不复用 rework 的 archaeology/safety-net（那两个阶段的产出——行为锁定/安全网测试——对"不改代码"的任务无意义）。
-- **git 语义与 rework 相反**：调研不硬依赖 git 历史——非 git 目录允许（落盘即交付）；git 仓库内则报告/探针照 commit 纪律（trailer `phase: dev-N` 沿用，scope/survey 期产物一并入报告目录）。
+- **git 语义与 rework 相反**：调研不硬依赖 git 历史——非 git 目录允许（落盘即交付）；git 仓库内则报告/探针照 commit 纪律（trailer `worker: <你的名>, phase: dev-N`，worker 署名与 worker.md 通用条款对齐）。
 - **只读红线的机械信号**：`git diff --name-only` 文件集 ⊆ `--out` 报告目录，越界即 REFINE（复用 rework 范围比对的执行姿势，比对对象从"声明文件范围"换成"报告目录"）。
 - **证据分级的抽查义务在监工**：A-C 级结论监工亲自复现关键证据（重跑命令/grep/打开链接）——延续"机械回放纪律，不只信 worker 摘要"；抽查发现一条伪证 → 整章 REFINE 重查（伪证不是局部问题，是整章可信度问题）。
 - **`--out <报告目录>`缺省 `<project-dir>/docs/research/<日期-主题>/`**：与 walk-tracer 实践中 docs/rework/ 的先例一致。
@@ -45,3 +45,13 @@ v3 核心资产（身份/账本/四层中断防御/巡检/watchdog/OODA/三层�
 ## 6. 测试
 
 install.sh 的拼接结构断言即本模式的安装期回归（断言失败中止安装不留半成品）；运行期行为由核心协议的既有测试面（hook/watchdog/registry 全绿）覆盖——模式层是纯 prompt 文本，无可执行面。
+
+## 7. 真机冒烟验证（2026-09-09，冒烟后补记）
+
+**结果：通过。** scratch 靶仓 research-smoke（3 commit 预埋债务）真机跑通 scope→survey→dev-1/2/3→done 全链路，5 上报 5 APPROVE 零 REFINE，产品代码零改动。核心断言全部兑现：registry mode=research 注册、worker 握手 sid 交叉验证、初始指令五项下发（双路 CR P1-1 修复真机闭环）、每章范围比对基线 commit（P1-A 修复真机闭环）、A/B 级证据抽查复现零伪证、结论对账、未决显式化、总结报告披露三件、收尾（cron 删/registry 注销）。冒烟全记录见 `research-smoke/SMOKE-REPORT.md`（靶仓，不入本仓）。
+
+冒烟发现 3 项（均不阻塞），处置如下：
+
+1. **commit 缺 `worker:` 署名 trailer（已修）**：模式层 research.md 两处（worker-facing 下发条款④ + 非 git 差异声明）只写了 `phase: dev-N`，与 worker.md 通用条款 `worker: <你的名>, phase: dev-N` 不一致——worker 遵循更具体的模式层条款导致无名 commit（与 walk-tracer P3-1 署名教训同根）。修复：两处补齐 `worker: <你的名>`，spec.md §4 同步（即本节上文已改处）。教训入账：**模式层覆盖 worker.md 条款时必须整条抄全，不能只抄差异半句——半条覆盖比不覆盖更危险**（worker 有理由认为模式层是完整裁定）。
+2. **watchdog 系统 crontab 被 claude auto mode 分类器拦截**（Unauthorized Persistence）：supervisor 如实上报未装上并给手动补装命令；session-only 巡检 cron 不受影响。属安全策略与第五层防御的固有张力，非本模式缺陷，不修（记录备查）。
+3. **SessionStart injector hook JSON 报错**：复跑输出干净，判环境瞬态，观察不修。
