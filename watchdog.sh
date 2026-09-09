@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
-# supervisor-watchdog: detect overdue (interrupted/silent) workers and alert
-# the supervisor. Cron-friendly: always exits 0, never noisy.
+# supervisor-watchdog: two jobs, cron-friendly (always exits 0, never noisy):
+#   1. detect overdue (interrupted/silent) WORKERS and alert the supervisor;
+#   2. triage the SUPERVISOR ITSELF (heartbeat vs socket liveness) and notify
+#      the USER via desktop notification - nobody watches the watcher, so the
+#      watchdog does (see stop-anomaly.md / incident 2026-09-07: supervisor
+#      degraded 3.5h with zero protocol path to detect it).
 #
 # Worker sessions killed by 429 / network loss / process death cannot send any
 # message themselves (no WORKER REPORT will ever arrive). This script is the
 # external timer the passive supervisor lacks.
+#
+# Supervisor triage (v3.1):
+#   - heartbeat clock: registry entry's last heartbeat (the supervisor refreshes
+#     it on every patrol cron tick, by protocol);
+#   - liveness clock: session transcript mtime in ~/.claude/projects/... (the
+#     only machine-readable "the session is still producing something" signal);
+#   - DELIVERY (session dead):     notify user "supervisor session dead,
+#     claude --resume <sid>" - the alert the supervisor would have wanted;
+#   - DEGRADED (socket alive + heartbeat stale >= threshold): notify user
+#     "supervisor suspected degraded (responding but not progressing), needs
+#     human intervention (/compact / model switch)". Model-error / empty-turn
+#     rounds keep the transcript moving while zero heartbeat - that's exactly
+#     the 3.5h incident signature;
+#   - alert dedup: same per-shard watchdog_state.json, key "supervisor:<sid>",
+#     ladder reset when the heartbeat basis moves forward (recovered).
 #
 # v3 shard-aware:
 #   - enumerates UUID-named shard dirs under .supervisor/ (archive/ and any
@@ -212,12 +231,126 @@ if not ledgers:
 
 sessions = load_sessions()
 
+# registry entries: the heartbeat clock for supervisor self-triage lives in
+# .supervisor/registry.json (entries refreshed by `registry.py heartbeat` on
+# every patrol cron tick, by protocol). Missing/unreadable registry -> no
+# heartbeat clock -> supervisor triage silently disabled (worker watch
+# unaffected).
+registry_entries = []
+try:
+    with open(os.path.join(sup_dir, "registry.json")) as f:
+        reg = json.load(f)
+    if isinstance(reg, dict):
+        for ent in reg.get("supervisors") or []:
+            if isinstance(ent, dict):
+                registry_entries.append(ent)
+except Exception:
+    pass
+
 now = datetime.datetime.now()
 all_alert_names = []
+# supervisor self-triage hits are printed/notified inline below; no
+# aggregate list is needed (the worker section keeps its own to_alert list
+# because its delivery is UDS-routed and batched).
 
 for st, ledger_dir in ledgers:
     if st.get("done"):
         continue
+
+    wd_state_path = os.path.join(ledger_dir, "watchdog_state.json")
+
+    # ---- supervisor self-triage (same shard; skipped for done ledgers) ----
+    # heartbeat clock lives in the REGISTRY entry (the supervisor refreshes it
+    # on every patrol cron tick via `registry.py heartbeat`, by protocol);
+    # state.json itself has no heartbeat field.
+    sup_sid = st.get("supervisor_session_id")
+    sup_name = st.get("supervisor_name") or "(unnamed)"
+    # wd_state is shared by self-triage (key supervisor:<sid>) and the worker
+    # ladder below; load once here.
+    wd_state = {}
+    try:
+        with open(wd_state_path) as f:
+            wd_state = json.load(f)
+        if not isinstance(wd_state, dict):
+            wd_state = {}
+    except Exception:
+        wd_state = {}
+    reg_hb_ts = None
+    if isinstance(sup_sid, str) and sup_sid:
+        for ent in registry_entries:
+            if isinstance(ent, dict) and ent.get("session_id") == sup_sid:
+                reg_hb_ts = parse_ts(ent.get("heartbeat_ts"))
+                break
+    if reg_hb_ts is not None \
+            and (now - reg_hb_ts).total_seconds() / 60.0 > threshold_min:
+            sock_alive = False
+            # scan ALL records matching this sid (not just the first):
+            # resume leaves stale session json behind; the worker-routing
+            # loop below only breaks on a LIVE socket -- keep the same
+            # defensive posture so a stale record can't fake a DEAD verdict.
+            for o in sessions:
+                if o.get("sessionId") == sup_sid:
+                    sp = o.get("messagingSocketPath")
+                    if isinstance(sp, str) and sp and os.path.exists(sp):
+                        sock_alive = True
+                        break
+            mode = "DEGRADED" if sock_alive else "DEAD"
+            rec = wd_state.get("supervisor:%s" % sup_sid) or {}
+            prev_hb = rec.get("basis")
+            hb_iso = reg_hb_ts.isoformat()
+            mins_stale = int((now - reg_hb_ts).total_seconds() // 60)
+            # ladder reset: heartbeat moved forward since the last alert ->
+            # the supervisor recovered in between; alert from scratch next time
+            if hb_iso != prev_hb or mins_stale \
+                    >= (rec.get("last_alert_min") or 0) + threshold_min:
+                wd_state["supervisor:%s" % sup_sid] = {
+                    "last_alert_min": mins_stale,
+                    "basis": hb_iso,
+                    "last_alert_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                # persist BEFORE notifying (worst case: one lost notification
+                # on crash, never a duplicate storm)
+                try:
+                    import tempfile
+                    fd, tmp = tempfile.mkstemp(
+                        dir=os.path.dirname(wd_state_path) or ".",
+                        prefix=".wdstate-")
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(wd_state, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp, wd_state_path)
+                except Exception:
+                    pass
+                mins = mins_stale
+                if mode == "DEAD":
+                    body = ("SUPERVISOR DEAD: '%s' (sid %s) 心跳停更 %d 分钟且"
+                            "会话 socket 不存在——会话已死（/exit / crash 后未"
+                            " resume）。恢复：在项目目录执行 claude --resume"
+                            " %s，resume 后 supervisor 会走 register 幂等"
+                            "重建自愈。" % (sup_name, sup_sid, mins, sup_sid))
+                else:
+                    body = ("SUPERVISOR DEGRADED: '%s' (sid %s) 心跳停更 %d 分钟"
+                            "但会话仍活着（socket 在）——疑似模型劣化（响应 cron"
+                            "但零产出，同 09-07 事故形态）。需人工介入：/compact"
+                            " 或换模型后 resume。若会话实际已无响应（kill -9 等"
+                            "残留 socket 场景），按 DEAD 处理：claude --resume"
+                            " %s。" % (sup_name, sup_sid, mins, sup_sid))
+                print(body)
+                # notification to the USER (the supervisor may be the patient)
+                if not os.environ.get("CLAUDE_SUPERVISOR_WATCHDOG_NO_NOTIFY"):
+                    try:
+                        import subprocess
+                        subprocess.run(
+                            ["osascript", "-e",
+                             'on run argv\n'
+                             'display notification (item 1 of argv) with title'
+                             ' (item 2 of argv)\n'
+                             'end run',
+                             "--", body, "supervisor-watchdog"],
+                            check=False, timeout=10,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
 
     overdue = []  # (name, session_id, phase, silence_min, basis)
     for w in st.get("workers") or []:
@@ -235,15 +368,6 @@ for st, ledger_dir in ledgers:
         continue
 
     # ---- alert de-duplication (escalation ladder), per shard ----
-    wd_state_path = os.path.join(ledger_dir, "watchdog_state.json")
-    wd_state = {}
-    try:
-        with open(wd_state_path) as f:
-            wd_state = json.load(f)
-        if not isinstance(wd_state, dict):
-            wd_state = {}
-    except Exception:
-        wd_state = {}
 
     to_alert = []
     for name, sid, phase, m, basis in overdue:

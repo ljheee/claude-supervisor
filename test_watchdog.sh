@@ -314,5 +314,115 @@ assert_eq "N: archive worker never alerted" "$NA" "$(grep -c 'WATCHDOG ALERT' "$
 if [ ! -f "$PROJ/.supervisor/archive/old-round/watchdog_state.json" ]; then
   pass "N: archive dir untouched"; else fail "N: archive dir written"; fi
 
+# ---- supervisor self-triage cases (v3.1): registry heartbeat x socket ----
+# heartbeat clock = .supervisor/registry.json entries[].heartbeat_ts (the
+# supervisor refreshes it on every patrol cron tick, by protocol).
+# NOTE: runs on the FLAT layout with the v3 shards removed (case M seeded
+# two shards earlier); self-triage must also work with zero workers - the
+# exact "supervisor died, nobody left watching" scenario.
+rm -rf "$PROJ/.supervisor/11111111-1111-1111-1111-111111111111" \
+       "$PROJ/.supervisor/22222222-2222-2222-2222-222222222222"
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+mk_reg() { # heartbeat_iso
+  cat > "$PROJ/.supervisor/registry.json" <<EOF
+{"supervisors":[{"session_id":"sup-sid-1","name":"sup","mode":"greenfield",
+  "goal":"g","heartbeat_ts":"$1","registered_at":"$1"}]}
+EOF
+}
+OUTF="$TMP/selftriage.out.txt"
+
+# ---- case Q: supervisor DEAD (heartbeat stale + NO session) -> DEAD notice ----
+# remove the fake session file: the supervisor session no longer exists
+rm -f "$SESSIONS/60001.json" "$SESSIONS/60001.x.key"
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+STALE=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=95)).isoformat())")
+# no worker entry at all (self-triage must work even with zero workers)
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[],"reviews":[],"done":false}
+EOF
+mk_reg "$STALE"
+run_wd 60 > "$OUTF"
+assert_contains "Q: stale heartbeat + dead session -> SUPERVISOR DEAD" "$OUTF" "SUPERVISOR DEAD"
+assert_contains "Q: DEAD notice carries resume guidance" "$OUTF" "claude --resume"
+
+# ---- case R: supervisor DEGRADED (heartbeat stale + session alive) ----
+mk_sess 60001 "sup-sid-1" "$SUP_SOCK"
+rm -f "$PROJ/.supervisor/watchdog_state.json"
+run_wd 60 > "$OUTF"
+assert_contains "R: stale heartbeat + live socket -> SUPERVISOR DEGRADED" "$OUTF" "SUPERVISOR DEGRADED"
+assert_contains "R: DEGRADED notice asks for human intervention" "$OUTF" "人工介入"
+
+# ---- case S: fresh heartbeat + live session -> no self-triage alert ----
+rm -f "$PROJ/.supervisor/watchdog_state.json"
+FRESH=$(python3 -c "import datetime;print(datetime.datetime.now().isoformat())")
+mk_reg "$FRESH"
+run_wd 60 > "$OUTF"
+assert_not_contains "S: fresh heartbeat -> no supervisor alert" "$OUTF" "SUPERVISOR"
+grep -q . "$SPOOL" 2>/dev/null || : > "$SPOOL"   # ensure file exists for grep -c
+assert_eq "S: empty workers -> no worker alert either" "$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)" "0"
+
+# ---- case T: self-triage dedup ladder (same stale basis -> suppress;
+#      heartbeat moved but still stale -> re-alert from scratch) ----
+rm -f "$PROJ/.supervisor/watchdog_state.json"
+mk_reg "$STALE"
+run_wd 60 > /dev/null            # first alert
+run_wd 60 > "$OUTF"
+assert_not_contains "T: same basis within ladder step -> suppressed" "$OUTF" "SUPERVISOR"
+STALE2=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=75)).isoformat())")
+mk_reg "$STALE2"
+run_wd 60 > "$OUTF"
+assert_contains "T: heartbeat moved forward (recovered-ish) but still stale -> fresh alert" "$OUTF" "SUPERVISOR DEGRADED"
+
+# ---- case U: dual shards -> independent self-triage + per-shard dedup ----
+# shard dirs must be UUID-shaped (SHARD_NAME_RE); with shards present the
+# flat state.json is ignored entirely (shards-first enumeration).
+SID_A="aaaaaaaa-0000-0000-0000-000000000001"
+SID_B="bbbbbbbb-0000-0000-0000-000000000002"
+mkdir -p "$PROJ/.supervisor/$SID_A" "$PROJ/.supervisor/$SID_B"
+for sid in "$SID_A" "$SID_B"; do
+  cat > "$PROJ/.supervisor/$sid/state.json" <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup-$sid","supervisor_session_id":"$sid",
+ "workers":[],"reviews":[],"done":false}
+EOF
+done
+# both stale; A has a live socket (DEGRADED), B has none (DEAD)
+mk_sess 60002 "$SID_A" "$SUP_SOCK"
+mk_reg2() { # writes TWO entries with given heartbeat_isos
+  cat > "$PROJ/.supervisor/registry.json" <<EOF
+{"supervisors":[
+ {"session_id":"$SID_A","name":"sup-a","mode":"greenfield","goal":"g",
+  "heartbeat_ts":"$1","registered_at":"$1"},
+ {"session_id":"$SID_B","name":"sup-b","mode":"rework","goal":"g",
+  "heartbeat_ts":"$2","registered_at":"$2"}]}
+EOF
+}
+mk_reg2 "$STALE" "$STALE"
+OUTF="$TMP/dualshard.out.txt"
+run_wd 60 > "$OUTF"
+assert_contains "U: shard A stale+live socket -> DEGRADED" "$OUTF" "SUPERVISOR DEGRADED"
+assert_contains "U: shard A alert names its own sid" "$OUTF" "$SID_A"
+assert_contains "U: shard B stale+no session -> DEAD" "$OUTF" "SUPERVISOR DEAD"
+assert_contains "U: shard B alert names its own sid" "$OUTF" "$SID_B"
+assert_eq "U: one alert each, no cross-fire" "$(grep -c 'SUPERVISOR' "$OUTF" || true)" "2"
+# dedup lives in EACH shard's own watchdog_state.json -> second run silent
+run_wd 60 > "$OUTF"
+assert_not_contains "U: both shards suppressed on rerun" "$OUTF" "SUPERVISOR"
+[ -f "$PROJ/.supervisor/$SID_A/watchdog_state.json" ] \
+  && pass "U: shard A has own dedup state" || fail "U: shard A dedup state missing"
+[ -f "$PROJ/.supervisor/$SID_B/watchdog_state.json" ] \
+  && pass "U: shard B has own dedup state" || fail "U: shard B dedup state missing"
+# independent ladders: move B's heartbeat forward (still stale) -> only B re-alerts
+STALE_B2=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=75)).isoformat())")
+mk_reg2 "$STALE" "$STALE_B2"
+run_wd 60 > "$OUTF"
+assert_contains "U: B's moved heartbeat re-alerts (DEAD)" "$OUTF" "SUPERVISOR DEAD"
+assert_not_contains "U: A's unchanged basis stays suppressed" "$OUTF" "SUPERVISOR DEGRADED"
+
+# ---- cleanup self-triage fixtures (registry.json absent from earlier cases'
+#      premises; later files in this script never relied on it, remove anyway) ----
+rm -f "$PROJ/.supervisor/registry.json" "$PROJ/.supervisor/watchdog_state.json"
+rm -rf "$PROJ/.supervisor/$SID_A" "$PROJ/.supervisor/$SID_B"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$FAILURES assertion(s) FAILED - tmp preserved: $TMP"; trap - EXIT; exit 1; fi

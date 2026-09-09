@@ -510,6 +510,230 @@ assert_eq "case21 archive write allowed" "0" "$?"
 echo '{"session_id":"x","tool_name":"Write","tool_input":{"file_path":"'"$P4"'/.supervisor/state.json"}}' | python3 "$GUARD" 2>/dev/null
 assert_eq "case21 flat state.json write allowed" "0" "$?"
 
+# ---------- cases 22-27: stop-anomaly-capture.py (Stop hook) ----------
+# Sandbox: same fake sessions dir + same flat ledger (worker-session-1 is a
+# registered worker, supervisor-session-1 has a live socket). Transcript
+# fixtures are built per case in $TMP/trXX.jsonl.
+ANOM="$HOOK_DIR/stop-anomaly-capture.py"
+
+fire_anom() { # payload-json
+  echo "$1" | CLAUDE_SUPERVISOR_SESSIONS_DIR="$TMP/sessions" python3 "$ANOM"
+}
+
+# case 22: model-error turn -> immediate delivery + interrupts.jsonl entry
+TR22="$TMP/tr22.jsonl"
+python3 - "$TR22" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"do it"},
+   "timestamp":"2026-09-07T23:00:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"working"}]},"timestamp":"2026-09-07T23:00:05Z"},
+  {"type":"user","message":{"role":"user","content":"next turn"},
+   "timestamp":"2026-09-07T23:02:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"error",
+   "content":[{"type":"text","text":"Sorry, I encountered an error"}]},
+   "timestamp":"2026-09-07T23:02:43Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+start_server "$SUP_SOCK" "$TMP/received22.txt"
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR22"'"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case22 model-error delivered" "$TMP/received22.txt" 'WORKER INTERRUPTED'
+assert_contains "case22 kind=model-error" "$TMP/received22.txt" 'kind: model-error'
+K22=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case22 ledger kind model-error" "model-error" "$K22"
+D22=$(json_field "$interrupts" "objs[-1]['delivered']")
+assert_eq "case22 delivered=true" "True" "$D22"
+
+# case 23: healthy turn -> no alert, no write, and streak state stays clean
+TR23="$TMP/tr23.jsonl"
+python3 - "$TR23" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"do it"},
+   "timestamp":"2026-09-07T10:00:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-opus",
+   "content":[{"type":"text","text":"thinking"},
+              {"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+   "timestamp":"2026-09-07T10:00:05Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"ok"}]},
+   "timestamp":"2026-09-07T10:00:07Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-opus",
+   "content":[{"type":"text","text":"done, committed"}]},
+   "timestamp":"2026-09-07T10:00:09Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+N23=$(grep -c . "$interrupts" || true)
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR23"'"}'
+assert_eq "case23 healthy turn no write" "$N23" "$(grep -c . "$interrupts" || true)"
+# note: anomaly_state.json may legitimately exist as {} after case 22's
+# delivery (delivery pops the streak key but keeps the file); the correct
+# healthy invariant is "no streak key", not "no file"
+S23=$(python3 -c "
+import json, os
+p = '$PROJ/.supervisor/anomaly_state.json'
+d = json.load(open(p)) if os.path.exists(p) else {}
+print(d.get('empty_streak:worker-session-1', 'gone'))")
+assert_eq "case23 healthy turn carries no streak key" "gone" "$S23"
+
+# case 24: empty-turn:full single hit -> suppressed (streak=1, no delivery)
+TR24="$TMP/tr24.jsonl"
+python3 - "$TR24" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"patrol"},
+   "timestamp":"2026-09-07T13:20:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":""}]},"timestamp":"2026-09-07T13:23:00Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+N24=$(grep -c . "$interrupts" || true)
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR24"'"}'
+assert_eq "case24 full single hit suppressed" "$N24" "$(grep -c . "$interrupts" || true)"
+S24=$(python3 -c "import json;d=json.load(open('$PROJ/.supervisor/anomaly_state.json'));print(d.get('empty_streak:worker-session-1'))")
+assert_eq "case24 streak recorded =1" "1" "$S24"
+
+# case 24b: second consecutive full hit -> delivered
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR24"'"}'
+N24B=$((N24+1))
+assert_eq "case24b full second hit delivered" "$N24B" "$(grep -c . "$interrupts" || true)"
+K24B=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case24b kind empty-turn:full" "empty-turn:full" "$K24B"
+
+# case 25: empty-turn:tail single hit -> delivered immediately
+TR25="$TMP/tr25.jsonl"
+python3 - "$TR25" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"continue phase 3"},
+   "timestamp":"2026-09-07T10:50:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"editing file"},
+              {"type":"tool_use","id":"t1","name":"Edit","input":{}}]},
+   "timestamp":"2026-09-07T10:50:10Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"ok"}]},
+   "timestamp":"2026-09-07T10:50:12Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"\u2026"}]},
+   "timestamp":"2026-09-07T10:52:00Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+start_server "$SUP_SOCK" "$TMP/received25.txt"
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR25"'"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case25 tail single hit delivered" "$TMP/received25.txt" 'kind: empty-turn:tail'
+K25=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case25 ledger kind tail" "empty-turn:tail" "$K25"
+
+# case 26: healthy turn after anomaly -> streak reset
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR23"'"}'
+S26=$(python3 -c "
+import json, os
+p = '$PROJ/.supervisor/anomaly_state.json'
+d = json.load(open(p)) if os.path.exists(p) else {}
+print(d.get('empty_streak:worker-session-1', 'gone'))")
+assert_eq "case26 healthy turn resets streak" "gone" "$S26"
+
+# case 27: unsupervised session (stranger sid) -> zero interference
+TR27="$TMP/tr27.jsonl"
+cp "$TR22" "$TR27"
+N27=$(grep -c . "$interrupts" || true)
+fire_anom '{"hook_event_name":"Stop","session_id":"some-random-session","cwd":"'"$PROJ"'","transcript_path":"'"$TR27"'"}'
+assert_eq "case27 stranger session no write" "$N27" "$(grep -c . "$interrupts" || true)"
+
+# case 28: tail window growth -- boundary sits beyond the initial 64KB
+# window (huge tool_result fills the tail); the tool_work must be INSIDE
+# the last turn for tail classification: user "now finish" -> tool_use ->
+# huge tool_result -> assistant "…". The 200KB tool_result pushes the
+# boundary user record out of the first scan window.
+TR28="$TMP/tr28.jsonl"
+python3 - "$TR28" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"big work"},
+   "timestamp":"2026-09-07T11:00:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-opus",
+   "content":[{"type":"text","text":"reading"},
+              {"type":"tool_use","id":"t0","name":"Read","input":{}}]},
+   "timestamp":"2026-09-07T11:00:05Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t0","content":"y" * 100000}]},
+   "timestamp":"2026-09-07T11:00:07Z"},
+  {"type":"user","message":{"role":"user","content":"now finish"},
+   "timestamp":"2026-09-07T11:01:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"working"},
+              {"type":"tool_use","id":"t1","name":"Edit","input":{}}]},
+   "timestamp":"2026-09-07T11:01:05Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"x" * 200000}]},
+   "timestamp":"2026-09-07T11:01:07Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"…"}]},
+   "timestamp":"2026-09-07T11:01:10Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+start_server "$SUP_SOCK" "$TMP/received28.txt"
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR28"'"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case28 window growth finds boundary -> tail delivered" "$TMP/received28.txt" 'kind: empty-turn:tail'
+K28=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case28 ledger kind tail (not full: earlier turn had tools)" "empty-turn:tail" "$K28"
+
+# case 29: stop-anomaly git fallback -- anomaly turn in a linked worktree
+# must find the MAIN worktree's shard (regression for the missing-dirname
+# bug where root pointed at .git/ itself and the fallback never resolved)
+# reuse case 15's wtmain/wtlink fixture (still on disk)
+WT_TR="$TMP/tr29.jsonl"
+python3 - "$WT_TR" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"continue"},
+   "timestamp":"2026-09-07T12:45:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"editing"},
+              {"type":"tool_use","id":"t1","name":"Edit","input":{}}]},
+   "timestamp":"2026-09-07T12:45:10Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"ok"}]},
+   "timestamp":"2026-09-07T12:45:12Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"error",
+   "content":[{"type":"text","text":"Sorry, I encountered an error"}]},
+   "timestamp":"2026-09-07T12:46:22Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+fire_anom '{"hook_event_name":"Stop","session_id":"w-sid-7","cwd":"'"$WTLINK/src"'","transcript_path":"'"$WT_TR"'"}'
+if [ -f "$WTMAIN/.supervisor/$SID_A/interrupts.jsonl" ] \
+   && [ "$(grep -c 'model-error' "$WTMAIN/.supervisor/$SID_A/interrupts.jsonl" || true)" -ge 1 ]; then
+  pass "case29 worktree anomaly landed in main-worktree shard"
+else fail "case29 worktree anomaly NOT delivered to main-worktree shard (git fallback broken)"; fi
+if [ ! -e "$WTLINK/.supervisor" ]; then
+  pass "case29 nothing created inside worktree"; else fail "case29 .supervisor created in worktree"; fi
+
+# cleanup anomaly fixtures so the shared sandbox stays pristine for reruns
+rm -f "$PROJ/.supervisor/anomaly_state.json"
+
 # ---------- summary ----------
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

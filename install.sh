@@ -6,12 +6,16 @@
 #
 #   /supervisor  - initialize the current session as the greenfield-mode supervisor
 #   /rework      - initialize the current session as the rework/refactor supervisor
+#   /research    - initialize the current session as the research/exploration supervisor
 #   /worker      - register the current session as a supervised worker
 #   registry.py  - v3 discovery-layer helper (installed to ~/.agent-mail, next
 #                  to watchdog; all registry.json writes go through it)
 #   watchdog     - external overdue-worker detector (installed to ~/.agent-mail)
 #   StopFailure  - auto-report interrupted workers (hook, installed to
 #                  ~/.claude/hooks/claude-supervisor/ and registered in settings.json)
+#   Stop         - model-layer anomaly capture (model:error / empty-turn /
+#                  tail-degradation criteria, replay-verified; same UDS
+#                  delivery as StopFailure, registered at hooks.Stop)
 #   SessionStart - v3 identity injector: prints "SESSION_ID <uuid> <source>"
 #                  into every session's context (user-level registration)
 #   PreToolUse   - v3 shard guard for Write|Edit: blocks cross-shard writes
@@ -112,6 +116,7 @@ echo "==> Installing slash commands to $DEST (mode layer + core splice)"
 mkdir -p "$DEST"
 splice_command "$SRC/commands/supervisor.md" "$DEST/supervisor.md"
 splice_command "$SRC/commands/rework.md" "$DEST/rework.md"
+splice_command "$SRC/commands/research.md" "$DEST/research.md"
 install_backup "$SRC/commands/worker.md" "$DEST/worker.md"
 
 # core file: reference copy in hooks dir ONLY (never into ~/.claude/commands/ --
@@ -144,9 +149,10 @@ mkdir -p "$HOOK_DIR"
 install_backup "$SRC/hooks/worker-stopfailure.py" "$HOOK_DIR/worker-stopfailure.py"
 install_backup "$SRC/hooks/session-start-injector.py" "$HOOK_DIR/session-start-injector.py"
 install_backup "$SRC/hooks/shard-guard.py" "$HOOK_DIR/shard-guard.py"
+install_backup "$SRC/hooks/stop-anomaly-capture.py" "$HOOK_DIR/stop-anomaly-capture.py"
 
 echo "==> Registering hooks in $SETTINGS (user-level)"
-python3 - "$SETTINGS" "$HOOK_DIR/worker-stopfailure.py" "$HOOK_DIR/session-start-injector.py" "$HOOK_DIR/shard-guard.py" <<'PYEOF'
+python3 - "$SETTINGS" "$HOOK_DIR/worker-stopfailure.py" "$HOOK_DIR/session-start-injector.py" "$HOOK_DIR/shard-guard.py" "$HOOK_DIR/stop-anomaly-capture.py" <<'PYEOF'
 import fcntl
 import json
 import os
@@ -162,6 +168,7 @@ HOOK_REGISTRATIONS = [
     ("StopFailure", None, 0),
     ("SessionStart", None, 1),
     ("PreToolUse", "Write|Edit", 2),
+    ("Stop", None, 3),
 ]
 
 
@@ -274,22 +281,34 @@ echo "  老项目修补/重构（同一姿势，换命令）："
 echo "  终端A（项目目录）:               /rework 修复XX模块的YY问题 [--baseline <git-ref>]"
 echo "  终端B（同一项目目录）:           /worker"
 echo ""
+echo "  调研/探索任务（产出报告不改代码，非 git 目录也可用）："
+echo "  终端A（任意目录）:               /research 调研XX技术选型/事故根因 [--out <报告目录>]"
+echo "  终端B（同一目录）:               /worker"
+echo ""
 echo "  （可开更多终端重复 /worker，多 worker 并行受监工）"
 echo ""
-echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查→逐Phase开发(先自CR再受审)→总结报告（绿地）；rework 模式为 考古→安全网→改造规格→计划→逐Phase开发"
+echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查→逐Phase开发(先自CR再受审)→总结报告（绿地）；rework 模式为 考古→安全网→改造规格→计划→逐Phase开发；research 模式为 问题定义→调研方案→逐章调研(证据五级分级+逐问对账)"
 echo "多 supervisor 并存（v3）：同一项目可同时跑多个监工（如 /supervisor 开新模块 + /rework 改存量），"
 echo "各用唯一会话名（建议 /rename supervisor-gf / supervisor-rw，含项目后缀更稳）+ 各自分支/worktree 隔离；"
 echo "账本按 session_id 分片互不污染，worker 启动时从 .supervisor/registry.json 自选监工。"
 echo "依赖: Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure/SessionStart/PreToolUse"
 echo "      hooks；官方无检测接口，请自行 claude --version 确认）"
 echo ""
-echo "中断防御（可选）: cron 定时跑 watchdog，worker 失联时投递告警（路径含空格请加引号）："
-echo "  */10 * * * * \"$HOME/.agent-mail/supervisor-watchdog\" '/path/to/repo' 60"
+echo "中断防御（可选）: cron 定时跑 watchdog，worker 失联时投递告警。"
+echo "  正常路径无需手工配置——supervisor 启动协议步骤 7b 会自动注册系统 crontab（含盯"
+echo "  supervisor 自身心跳的第五层防御），收尾时自动移除。手工兜底时务必用与 7b 完全"
+echo "  相同的两行格式（标识行 + 条目行，脚本路径不加引号）——否则 7b 查重 miss 会产生"
+echo "  重复条目、收尾移除也匹配不掉："
+echo "  # supervisor-watchdog /path/to/repo"
+echo "  */10 * * * * ~/.agent-mail/supervisor-watchdog '/path/to/repo' 60"
 echo ""
 echo "中断防御（已自动安装）: StopFailure hook——worker 回合因 429/网络/API 错误被掐断时，"
 echo "自动向 supervisor 的 UDS 通道直投 WORKER INTERRUPTED，并落盘 .supervisor/<sid>/interrupts.jsonl"
 echo "（v3 分片路径，<sid> 是该 supervisor 的 session_id；旧平铺布局自动兼容）。"
 echo "仅对被监工项目里已注册（session_id 匹配）的 worker 会话生效，其他会话零干扰。"
+echo "Stop hook（stop-anomaly-capture）——回合看似正常结束但模型层异常时（model:error /"
+echo "空回合 / 尾部退化，判据见 stop-anomaly.md）同样直投+落盘；健康回合零 git spawn、"
+echo "零写入，未受监工会话付一次毫秒级有界尾扫后退出。"
 echo ""
 echo "v3 机械保障（已自动安装）: SessionStart 注入器——每个会话开局自动注入自身 SESSION_ID；"
 echo "PreToolUse 分片守卫——Write|Edit 写错分片或直编 registry.json 时机械拦截并给出正确分片键。"
