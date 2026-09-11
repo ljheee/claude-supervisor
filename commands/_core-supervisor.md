@@ -7,7 +7,7 @@
 
 ## 启动步骤（Observe 前的初始化）
 
-1. 解析参数：第一个非选项参数是**项目目标**；若有 `--project-dir`，那是被监工的仓库路径（默认当前目录）。启动时若 `<project-dir>/.supervisor/` 不在 .gitignore 中，提醒用户把 `.supervisor/` 加入 .gitignore（监工账本不应进 git，避免 worker commit 裹挟且多 worker 间无谓冲突）。
+1. 解析参数：第一个非选项参数是**项目目标**；若有 `--project-dir`，那是被监工的仓库路径（默认当前目录）。启动时若 `<project-dir>/.supervisor/` 不在 .gitignore 中，提醒用户把 `.supervisor/` 加入 .gitignore（监工账本不应进 git，避免 worker commit 裹挟且多 worker 间无谓冲突），并**主动询问是否代为追加一行**——用户点头即做（追加 `.supervisor/` 到 .gitignore，已有则不重复），不要只提醒不跟进（实测首跑用户未处理即全程裸奔）。
 2. 确认你自己的会话名与 session_id。**sid 首选 SessionStart 注入行**：本套件安装后每个会话开局被注入一行 `SESSION_ID <uuid> <source>`——直接取该行 UUID 作为你的 session_id。无注入行（未安装 hook 等）时 fallback：扫 `~/.claude/sessions/` 注册表，**匹配规则：name 相等且 cwd==project-dir**；仍多条（同名同目录）→ 报错并请用户 `/rename` 换名后重扫，禁止任选（选错 = 分片键错，hook 寻址永远 miss）。⚠️ 合法 session_id 是 36 位 UUID（形如 `d427b304-d742-42d2-bacc-470ec7d1475f`）；ListAgents 输出名字后的方括号短哈希**不是** session_id（当前版本 ListAgents 也不输出 UUID，不能作为 sid 来源）。**会话名固定**：若你是自动分配名（含 "test-" 等随机形态）或与已知名冲突，建议用户 `/rename supervisor-<模式或短后缀>`——会话名是消息路由键（SendMessage 只认名称，实测确认），多 supervisor 并存时必须唯一。
    **resume 恢复流程**（检测到本 sid 的分片已存在即视为 resume 场景；resume 会重分配会话名但保 sid）：先读 registry 本方条目与他人活跃条目——旧名未被占用才 `/rename` 回旧名，被占用则直接选新唯一名；随即执行注册命令 upsert 刷新 name（并自愈本方 stale 标记）；然后向用户汇报中断点继续。期间 worker 若按旧名寻址失败，会走死条目报告路径由用户引导（恢复流程收尾后自动重新可达）。
 3. **旧布局迁移**：检测到平铺 `<project-dir>/.supervisor/state.json`（v2/rework 遗留）→ 询问用户：归档（推荐，`mv` 为 `.supervisor/archive/<started_at>-<旧 goal 摘要>/`，目录名中 `/` 与空格替换为 `-`）或保留原地不动（本 supervisor 新建分片与旧账并存，旧账不再读写）。用户未答前不创建分片。旧账有未完结轮次（done:false 且 workers 非空）时警告用户：v3 supervisor 启动后 hook/watchdog 以分片优先，建议先让旧轮次收尾或归档。

@@ -55,3 +55,10 @@ install.sh 的拼接结构断言即本模式的安装期回归（断言失败中
 1. **commit 缺 `worker:` 署名 trailer（已修）**：模式层 research.md 两处（worker-facing 下发条款④ + 非 git 差异声明）只写了 `phase: dev-N`，与 worker.md 通用条款 `worker: <你的名>, phase: dev-N` 不一致——worker 遵循更具体的模式层条款导致无名 commit（与 walk-tracer P3-1 署名教训同根）。修复：两处补齐 `worker: <你的名>`，spec.md §4 同步（即本节上文已改处）。教训入账：**模式层覆盖 worker.md 条款时必须整条抄全，不能只抄差异半句——半条覆盖比不覆盖更危险**（worker 有理由认为模式层是完整裁定）。
 2. **watchdog 系统 crontab 被 claude auto mode 分类器拦截**（Unauthorized Persistence）：supervisor 如实上报未装上并给手动补装命令；session-only 巡检 cron 不受影响。属安全策略与第五层防御的固有张力，非本模式缺陷，不修（记录备查）。
 3. **SessionStart injector hook JSON 报错**：复跑输出干净，判环境瞬态，观察不修。
+
+## 8. 遗留观察（冒烟 + 用户正式跑各一轮后的综合终审，2026-09-09）
+
+两轮真机（冒烟 + 用户在 claude-supervisor 仓的正式调研）综合终审无 P1/P2，已修 4 项（§7.1 trailer 署名 + 本次终审条款化 3 项：core .gitignore 代为追加、监工代跑检索边界、`/rename` 时序），留两条观察：
+
+1. **时间盒未受压**：两轮各章实际耗时 15-25min，距 90min 时间盒与超时上报路径尚远——超时中间上报义务条款未在真机压力下验证过，留待长章调研（如事故根因考古）时观察。
+2. **显式 `--out` 路径未验证**：两轮均走缺省路径（`docs/research/<日期-主题>/` 定题回填），显式传参的启动即校验分支（父链不存在可 `mkdir -p` / 不可写 ESCALATE）未走过真机。
