@@ -47,7 +47,7 @@ subagent CR（独立会话 Explore agent，5 项发现逐条实证复核属实�
 
 ## 遗留观察
 
-- **范围比对「未提交改动」盲区为三模式共有**（rework.md:59 / research.md:47 / 本轮已修的 abstract）：只查 commit 区间 diff 漏未提交越界改动。research/rework 均经真机验证，补 `git status --porcelain` 是严格增强、无语义风险，但动它们意味着"真机验证过"的版本号推进——待用户裁决是否顺手统一修。
+- ~~范围比对「未提交改动」盲区为三模式共有~~ **已统一修（2026-09-10，用户裁决"修"）**：rework.md 与 research.md 的范围比对同样补 `git status --porcelain` + 基线 diff 双查（严格增强、无语义风险；research.md 原"裸 diff 只看未暂存改动"的括注方向写反，一并更正为"区间 diff 不含未提交改动"）。abstract 已在第二轮 CR 修复，三模式现已一致。
 
 ## pre-mortem
 
