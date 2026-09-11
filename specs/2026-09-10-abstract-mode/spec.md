@@ -2,7 +2,7 @@
 
 > 分支：`feat/v3-multi-supervisor`
 > 依据：2026-09-10 用户需求（"抽象提炼，提纲挈领的从更高层次抽象"）+ 需求裁决（形态=第四模式全套监工；输入=混合面；验收=两件套）
-> 状态：已实施（2026-09-10，含两轮 subagent CR 修复）；真机冒烟未做
+> 状态：已实施（2026-09-10，含两轮 subagent CR 修复）并真机冒烟通过（2026-09-11，见 §7）
 
 ## 1. 背景与问题
 
@@ -57,4 +57,15 @@ v3 核心资产（身份/账本/四层中断防御/巡检/watchdog/OODA/三层�
 
 ## 6. 测试
 
-install.sh 的拼接结构断言即本模式的安装期回归（断言失败中止安装不留半成品）；重拼后四产物与源逐字节比对（cmp）；核心协议既有测试面（hook/watchdog/registry）全绿证明零代码改动边界未破；模式层是纯 prompt 文本，无可执行面——真机行为留待冒烟验证（另记）。
+install.sh 的拼接结构断言即本模式的安装期回归（断言失败中止安装不留半成品）；重拼后四产物与源逐字节比对（cmp）；核心协议既有测试面（hook/watchdog/registry）全绿证明零代码改动边界未破；模式层是纯 prompt 文本，无可执行面——真机行为验证见 §7。
+
+## 7. 真机冒烟验证（2026-09-11）
+
+**结果：通过。** 本仓真材料（ef82f32..aa4ff9e 最近 8 commit 散碎改动）跑通 ingest → distill → refine-1 → done 全链路，三轮审查全 APPROVE 零 REFINE，81 分钟。核心断言 15 项全落地：registry mode=abstract 注册、五项下发、输入面锁死（含 ch1 面外只引转述的边界申报）、对抗式挖掘升级用户（材料面歧义裁决）、命题两分法（意图归因 0.7 封顶+反向解释）、覆盖矩阵零静默遗漏、缺席清单 7 项（生存者偏差写入置信度扣分）、**状态机参数化真机兑现（distill APPROVE → refine-1 非 dev-1，心跳证据 `worker phase=refine-1`）**、锚点抽查累计四轮 20+ 组零失配、commit trailer `worker: claude-supervisor-97, phase: refine-1`、报告落盘定题回填、收尾三件套干净退场。冒烟全记录见 `research-smoke/abstract-smoke/SMOKE-REPORT.md`（不入本仓）。
+
+冒烟发现 2 项 P2（均不阻塞）：
+
+1. **启动时序死锁窗口**：worker 先查后注册+挂起等用户，supervisor 注册后无主动重新发现动作（巡检见 workers 空报无待办）——双方互等，需用户在 worker 侧推一句。可选小修：core 巡检补“workers 为空且启动超 N 分钟 → ESCALATE 提醒用户”。
+2. **AskUserQuestion 与 turn 生命周期竞态 + TUI 僵死**：表单 pending 期间 turn 结束，答案无处投递且 TUI 不收键（Esc/C-l 无效），Ctrl-C 复位后以用户文本补投解锁。定性为 claude 2.1.259 平台固有张力（同 §7 冒烟记录 watchdog 拦截 crontab 同类），非本模式缺陷。
+
+时间盒未受压（最长单阶段 ≈25min < 90min），超时上报路径未验证——与 research 模式同款遗留观察。
