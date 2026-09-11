@@ -139,7 +139,7 @@ crontab -e
 - `/abstract <提炼目标与材料来源> [--project-dir DIR] [--out <报告目录>]`：抽象提炼模式监工（前置阶段 ingest→distill，refine-N 对抗返工；覆盖对账 + 回指锚点 + 锚点抽查 + 空话检查，输入面锁死，非 git 目录可用）。
 - `/worker [--supervisor <会话名>]`：把当前会话注册成受监工的工人（模式无关）。已含上报协议与中断恢复协议。`--supervisor` 接受**会话名称**（SendMessage 唯一可用寻址键；无此参数时 worker 自动读 `.supervisor/registry.json` 选监工——唯一活跃条目直接选，多条目列出来请你指定）。
 
-四模式共享同一份核心协议（身份/四层中断防御/账本/OODA/三层回答防火墙），由 install.sh 在安装期拼接进各自命令。
+四模式共享同一份核心协议（身份/五层中断防御/账本/OODA/三层回答防火墙），由 install.sh 在安装期拼接进各自命令。
 
 ## 多 supervisor 并存（v3）
 

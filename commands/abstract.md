@@ -10,7 +10,7 @@ argument-hint: <提炼目标与材料来源> [--project-dir DIR] [--out <报告�
 ## 模式声明（abstract 抽象提炼模式）
 
 - 本命令为**抽象提炼模式**（输入是一堆现成材料——文档/diff/口述背景的混合，产出是支配材料的高层命题，不是产品代码改动，也不去材料外查新证据）。前置阶段：`ingest → distill`，之后 `refine-N`（每轮针对审查缺陷定向返工，非逐章生产）。**执行阶段语义覆盖 core 的 dev-N 骨架（无 total_phases，覆盖即完整裁定）**：distill APPROVE 后 phase 置 `refine-1`（不是 dev-1）；每轮 REFINE → `refine-N+1`；收敛判据（一轮审查零 REFINE 且覆盖对账全过）达成 → phase 置 `done`，收尾照 core 状态机第 4 步执行（CronDelete/registry 注销/watchdog 移除/总结报告），不得套用 total_phases/Phase N+1 规则。
-- 本模式 phase 枚举：`<ingest|distill|refine-N>`（初始指令下发时以此覆盖 worker 协议的默认阶段枚举）。
+- 本模式 phase 枚举：`<ingest|distill|refine-N>`（初始指令下发时以此覆盖 worker 协议的默认阶段枚举——**含 WORKER REPORT 模板的 Phase 字段**，上报一律填实际 phase 值如 `refine-1`，不得写 dev-N）。
 - 首阶段指令全文：**进入 Phase 0 材料盘点，产出材料清单（与监工约定盘点粒度：可独立解释的最小单元——文档逐篇/commit 逐个/散 diff 逐 hunk 群）、逐件压缩（每件：它在说什么+具体锚点清单），按 WORKER REPORT 模板上报**。
 - registry 注册时 `--mode abstract`。
 - `--out <报告目录>`：报告的落盘目录。显式传参时启动即校验（父链存在或可 `mkdir -p` 创建，不可写 ESCALATE）；**缺省时启动只校验 `<project-dir>/docs/abstract/` 可创建**——完整路径的 `<日期-主题>` 主题词要 distill 定题后才确定，由你在 distill APPROVE 后定题回填完整路径，并在首个 refine 指令中显式下发给 worker（worker 不自己猜落盘位置）。
@@ -35,9 +35,9 @@ argument-hint: <提炼目标与材料来源> [--project-dir DIR] [--out <报告�
 
 ## refine-N 特化（abstract）
 
-- 每轮审查你必做三件（命令式动作）：**锚点抽查**——亲自打开若干回指锚点核对命题与材料相符（锚点指向不存在/内容不符即该命题 REFINE；系统性造假→整轮 REFINE 重提炼）；**覆盖对账**——材料清单×命题矩阵逐项核对（延续机械回放纪律：不只信 worker 的矩阵自报）；**空话检查**——按 distill 同一判据复核。同时核对**产品代码只读红线**（git 仓库内）：`git diff --name-only <本轮基线 commit>..HEAD` ⊆ 报告目录（基线 = 本轮首指令下发前最后一个 commit；进入首个 refine 前确认工作区 clean，非空升级用户处置），越界即 REFINE；非 git 目录以落盘审计面代替——报告产物路径 ⊆ 报告目录或系统临时目录。**免责通道**：确需改产品代码才能完成提炼/复现 → QUESTIONS「需用户」级申请，未获准就以材料内现有信息收稿并显式标注该缺口。
+- 每轮审查你必做三件（命令式动作）：**锚点抽查**——亲自打开若干回指锚点核对命题与材料相符（锚点指向不存在/内容不符即该命题 REFINE；系统性造假→整轮 REFINE 重提炼）；**覆盖对账**——材料清单×命题矩阵逐项核对（延续机械回放纪律：不只信 worker 的矩阵自报）；**空话检查**——按 distill 同一判据复核。同时核对**产品代码只读红线**（git 仓库内）：`git status --porcelain`（未提交改动）与 `git diff --name-only <本轮基线 commit>..HEAD`（已 commit 改动——两者必须同时查，只查 diff 会漏未提交的越界改动）文件集 ⊆ 报告目录（基线 = 本轮首指令下发前最后一个 commit；进入首个 refine 前确认工作区 clean，非空升级用户处置），越界即 REFINE；非 git 目录无 git 基线，审计面改为：worker 每轮上报**本轮新建/改动的全部文件路径清单**，你抽查核对均落在报告目录或系统临时目录——无法机械证明产品代码零改动，总结报告如实披露该边界。**免责通道**：确需改产品代码才能完成提炼/复现 → QUESTIONS「需用户」级申请，未获准就以材料内现有信息收稿并显式标注该缺口。
 - **对抗叙事强制**：对"故事最顺"的命题追问"有没有第二解释"——现实常是多因的，一个叙事解释所有材料往往是最可疑的那个。替代解释（至少一个+为何不选）为建议项：做了加分，未做不 REFINE。
-- **每轮产出即上报，不等整体收敛**（下发时显式约定——显式覆盖 worker 默认纪律）；收敛判据：一轮审查零 REFINE 且覆盖对账全过 → 进入收尾。
+- **每轮产出即上报，不等整体收敛**（下发时显式约定——显式覆盖 worker 默认纪律）；收敛判据：一轮审查零 REFINE 且覆盖对账全过 → 进入收尾。**Loop Guard 本模式适配**：REFINE 恒递增 phase 序号，core「同一 phase 连续 3 次」永不命中——改按同一 worker 的 refine 序列计数：连续 3 轮被退回（refine-3 仍收问题清单）→ ESCALATE 用户仲裁，不得无限返工。
 
 ## abstract 专属纪律
 

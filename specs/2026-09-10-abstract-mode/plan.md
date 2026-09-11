@@ -1,11 +1,11 @@
 # Plan: abstract 模式 — 抽象提炼任务监工
 
 > 依据：spec.md（同目录）
-> 状态：**设计定稿，dev-1..dev-4 待实施**（2026-09-10）
+> 状态：**dev-1..dev-4 已完成（2026-09-10，两轮 subagent CR 修复均入账）；真机冒烟待做**
 
 ## §0 约束回顾（来自 spec 的硬边界）
 
-- 绿地/rework/research 三模式层零改动：只允许新增 `commands/abstract.md` + install.sh 新增行 + core 枚举一处 + README/DESIGN/spec 纯追加；
+- 绿地/rework/research 三模式层零改动：只允许新增 `commands/abstract.md` + install.sh 新增行 + core 枚举与状态机参数化两处 + README/DESIGN/spec 纯追加；
 - 不改 worker.md / hooks / watchdog / registry.py（--mode 自由文本，无需动）；
 - 模式层预算 ≤ rework 的 68 行（§12.6 注入体积纪律）。
 
@@ -36,6 +36,18 @@ subagent CR（独立会话 Explore agent，5 项发现逐条实证复核属实�
 - **P2-2 非 git 与 git diff 强制检查冲突**：非 git 目录允许，但 refine-N 只读红线核对无条件 `git diff`。修：限定 git 仓库内执行，非 git 目录以落盘审计面代替（产物路径 ⊆ 报告目录或系统临时目录）。
 - **P3 README 四处**：「三个 hook」实装四个（Stop 漏列，存量错误顺手修）；abstract 示例命令断行；漂移恢复 FAQ 写死 `/supervisor`（改对应模式命令）；文件清单表漏 specs/2026-09-10-abstract-mode/ 行。
 - 查过无问题项：frontmatter 4 行闭合；h2 与 core 无撞名；行数/拼接数与 DESIGN §12.6 一致；install 注册/registry 枚举/命令表/卸载已覆盖 abstract；无模式计数残留。
+
+### 第二轮终审 CR（2026-09-10，独立会话，4 项发现逐条实证复核属实并已修）
+
+- **P1-1 WORKER REPORT 模板未覆盖**（core:46 `Phase: <本模式前置阶段枚举|dev-N>`）：refine-N 既非前置阶段也非 dev-N，worker 可能按 dev-N 上报。修：abstract.md phase 枚举条款显式声明覆盖范围含 REPORT 模板 Phase 字段。
+- **P1-2 范围比对漏未提交改动**：只查 `git diff <基线>..HEAD` 漏掉 worker 改了未 commit 的产品代码。修：abstract.md 补 `git status --porcelain` 与 diff 双查。⚠️ 同型盲区存在于 rework.md:59 与 research.md:47（存量，本轮不动真机验证过的 research/rework 条款，记录为遗留观察待用户裁决）。
+- **P2 Loop Guard 失效**：core:105「同一 phase 连续 3 次 REFINE」——abstract 的 REFINE 恒递增序号，该条款永不命中。修：abstract.md 补本模式适配（按 refine 序列计数，连续 3 轮退回即 ESCALATE）。
+- **P3 文档残留**：README「四层中断防御」与 core 节标题「五层防御」不一致（存量错误顺手修）；spec/plan 状态行仍写待实施/枚举一处。已同步。
+- 查过无问题项：三旧模式正确落入 dev-N 默认骨架；四拼接产物逐字一致；行数全符 §12.6；输入锁死/抽查/免责与时间盒数值自洽；install.sh `bash -n` 通过。
+
+## 遗留观察
+
+- **范围比对「未提交改动」盲区为三模式共有**（rework.md:59 / research.md:47 / 本轮已修的 abstract）：只查 commit 区间 diff 漏未提交越界改动。research/rework 均经真机验证，补 `git status --porcelain` 是严格增强、无语义风险，但动它们意味着"真机验证过"的版本号推进——待用户裁决是否顺手统一修。
 
 ## pre-mortem
 
