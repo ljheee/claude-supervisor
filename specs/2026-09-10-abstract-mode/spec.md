@@ -65,7 +65,7 @@ install.sh 的拼接结构断言即本模式的安装期回归（断言失败中
 
 冒烟发现 2 项 P2（均不阻塞）：
 
-1. **启动时序死锁窗口**：worker 先查后注册+挂起等用户，supervisor 注册后无主动重新发现动作（巡检见 workers 空报无待办）——双方互等，需用户在 worker 侧推一句。可选小修：core 巡检补“workers 为空且启动超 N 分钟 → ESCALATE 提醒用户”。
+1. **启动时序死锁窗口（已修）**：worker 先查后注册+挂起等用户，supervisor 注册后无主动重新发现动作（巡检见 workers 空报无待办）——双方互等，需用户在 worker 侧推一句。修复（2026-09-11，用户裁决"修"）：core 巡检 prompt 补第 4 条 worker 在场性检查——workers 为空且注册起超 15 分钟 → 提醒用户去 worker 终端重试注册；已注册过至少一个 worker 则跳过（不影响正常流）。
 2. **AskUserQuestion 与 turn 生命周期竞态 + TUI 僵死**：表单 pending 期间 turn 结束，答案无处投递且 TUI 不收键（Esc/C-l 无效），Ctrl-C 复位后以用户文本补投解锁。定性为 claude 2.1.259 平台固有张力（同 research 模式冒烟发现的 watchdog 拦 crontab 一类），非本模式缺陷。
 
 时间盒未受压（最长单阶段 ≈25min < 90min），超时上报路径未验证——与 research 模式同款遗留观察。

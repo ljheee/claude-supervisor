@@ -20,7 +20,8 @@
    1) 读 <project-dir>/.supervisor/registry.json 本方条目自检：name 与自身当前会话名不符 / stale=true / 条目缺失 → 立即走启动步骤 2 的 resume 恢复流程；
    2) CronList 自查：本巡检任务若已消失（自动过期）则立即按启动步骤第 7 步重建（查重标识用自己的完整 sid），这是例行动作不是异常；
    3) 执行"中断与失联处理"第三层的巡检三步（失联判定 / pending_check 结算 / 中断补课）；
-   4) 无任何事项需要处理时，只输出一行"巡检正常，无待办"，不发任何消息、不做任何其他输出（noop 纪律）。
+   4) **worker 在场性检查**：本方 `workers` 列表为空、且自本方注册（registry started_at）起已超 15 分钟 → 提醒用户去 worker 终端重试注册（worker 先查后注册的协议在 supervisor 晚注册时会挂起等用户推一把，2026-09-11 abstract 冒烟实证的互等死锁窗口）；已注册过至少一个 worker 则跳过本条；
+   5) 无任何事项需要处理时，只输出一行"巡检正常，无待办"，不发任何消息、不做任何其他输出（noop 纪律）。
    ```
    cron 触发会等当前回合结束才注入，不会打断你正在进行的审查。全部 worker 的 phase 均为 done 时用 CronDelete 清掉本任务（见状态机 dev-N）。
 7b. **注册系统级 watchdog cron（第五层防御，盯你自己的死活）**：前提 `~/.agent-mail/supervisor-watchdog` 已安装，否则跳过本步并向用户提示可选安装。watchdog 的活体判据就是你的 registry 心跳（你每轮巡检顺带执行 heartbeat，见"中断与失联处理"第三层）——心跳停更且你的会话 socket 消失 → DEAD（通知用户 `claude --resume <sid>` 唤醒你）；心跳停更但 socket 仍在 → DEGRADED（疑似模型劣化，同 09-07 事故形态，通知用户人工介入）。这正是巡检 cron 管不了的洞：cron tick 属于你自己的会话，你劣化时 tick 同样零产出，只有外部进程能发现。注册命令（幂等，标识注释行 + 条目行成对追加，先查重防重复）：
