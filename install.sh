@@ -49,11 +49,10 @@ set -euo pipefail
 # script WITHOUT a repo checkout next to it ($0 is the shell itself). Detect
 # the missing checkout and shallow-clone the repo into a temp dir first.
 #   - repo URL can be overridden: `... | sh -s -- <repo-url>` or
-#     SUPERVISOR_REPO_URL=<url> sh (default placeholder below must be replaced
-#     with the real <org>/<repo> when published)
+#     SUPERVISOR_REPO_URL=<url> (default: https://github.com/ljheee/claude-supervisor.git)
 SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 if [ ! -f "$SRC/commands/supervisor.md" ]; then
-  REPO_URL="${1:-${SUPERVISOR_REPO_URL:-https://github.com/xxxx/claude-supervisor.git}}"
+  REPO_URL="${1:-${SUPERVISOR_REPO_URL:-https://github.com/ljheee/claude-supervisor.git}}"
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   echo "==> No repo checkout found next to the script; cloning $REPO_URL"
