@@ -4,10 +4,11 @@
 
 支持四种模式：
 - **绿地模式**（`/supervisor`，从零开发新项目）。
-- **rework 模式**（`/rework`，老项目修补/重构——考古基线 + 回归安全网 + 不改清单）.
-- **research 模式**（`/research`，调研/探索任务——产出报告与证据而非代码改动）.
+- **rework 模式**（`/rework`，老项目修补/重构——考古基线 + 回归安全网 + 不改清单）。
+- **research 模式**（`/research`，调研/探索任务——产出报告与证据而非代码改动）。
 - **abstract 模式**（`/abstract`，抽象提炼——从一堆现成材料提炼支配它们的高层命题）。
 
+设计原理、逆向依据、中断模型 → 见 [DESIGN.md](DESIGN.md)。
 
 ## 安装
 
@@ -220,4 +221,3 @@ rm -rf ~/.claude/supervisor
 | `specs/2026-09-10-abstract-mode/` | abstract 模式 spec/plan（含 CR 记录） |
 | `install.sh` | 安装 |
 | `DESIGN.md` | 设计原理 |
-
