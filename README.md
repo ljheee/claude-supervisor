@@ -18,6 +18,8 @@ bash install.sh
 
 # 方式二：
 curl -fsSL https://raw.githubusercontent.com/ljheee/claude-supervisor/main/install.sh | sh
+# 私有 fork / 自建镜像可覆盖仓库地址：curl -fsSL .../install.sh | sh -s -- <repo-url>
+# 或 SUPERVISOR_REPO_URL=<url> sh ./install.sh
 ```
 
 
@@ -187,7 +189,7 @@ crontab -e
 ```bash
 rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/research.md ~/.claude/commands/abstract.md ~/.claude/commands/worker.md
 rm -rf ~/.claude/hooks/claude-supervisor
-rm ~/.claude/supervisor/supervisor-watchdog ~/.claude/supervisor/registry.py
+rm -rf ~/.claude/supervisor
 # 并从 ~/.claude/settings.json 的 hooks.StopFailure / hooks.SessionStart /
 # hooks.PreToolUse / hooks.Stop 数组中删掉对应条目
 ```
