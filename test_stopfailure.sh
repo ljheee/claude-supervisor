@@ -247,6 +247,493 @@ fire_hook "$PAYLOAD"
 D11=$(json_field "$interrupts" "objs[-1]['delivered']")
 assert_eq "case11 unresolvable supervisor -> delivered=false" "False" "$D11"
 
+# ---------- v3 shard layout: sandbox ----------
+HOOK_DIR=$(dirname "$HOOK")
+INJ="$HOOK_DIR/session-start-injector.py"
+GUARD="$HOOK_DIR/shard-guard.py"
+
+P3="$TMP/proj3"
+SUPA_SOCK="$TMP/supa.sock"
+SID_A="11111111-1111-1111-1111-111111111111"
+SID_B="22222222-2222-2222-2222-222222222222"
+mkdir -p "$P3/.supervisor/$SID_A" "$P3/.supervisor/$SID_B" "$P3/src"
+
+# sessions: supervisor-a live with socket + peerToken
+python3 - "$TMP/sessions" "$SUPA_SOCK" "$SID_A" "$P3" <<'EOF'
+import json, sys
+d, sock, sid, proj = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+json.dump({"pid": 55555, "sessionId": sid, "cwd": proj,
+           "messagingSocketPath": sock, "name": "supervisor-a",
+           "updatedAt": 9999999999999,
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/55555.json", "w"))
+json.dump({"peerToken": "token-a",
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/55555.xyz.key", "w"))
+EOF
+
+mkstate() { # file project_dir sup_name sup_sid worker_sid registered_at
+  python3 - "$@" <<'EOF'
+import json, sys
+p, proj, name, ssid, wsid, reg = sys.argv[1:7]
+json.dump({"goal": "g", "project_dir": proj, "supervisor_name": name,
+           "supervisor_session_id": ssid,
+           "workers": [{"name": "w1", "session_id": wsid,
+                        "phase": "dev-1", "registered_at": reg}],
+           "reviews": [], "done": False}, open(p, "w"))
+EOF
+}
+
+addworker() { # state_file worker_sid registered_at
+  python3 - "$@" <<'EOF'
+import json, sys
+p, wsid, reg = sys.argv[1], sys.argv[2], sys.argv[3]
+st = json.load(open(p))
+st.setdefault("workers", []).append(
+    {"name": "w2", "session_id": wsid, "phase": "dev-2",
+     "registered_at": reg})
+json.dump(st, open(p, "w"))
+EOF
+}
+
+mkstate "$P3/.supervisor/$SID_A/state.json" "$P3" "supervisor-a" "$SID_A" "w-sid-1" "2026-09-04T10:00:00"
+mkstate "$P3/.supervisor/$SID_B/state.json" "$P3" "supervisor-b" "$SID_B" "w-sid-9" "2026-09-04T10:00:00"
+
+# ---------- case 12: multi-shard targeted delivery ----------
+start_server "$SUPA_SOCK" "$TMP/recv12.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-1","cwd":"'"$P3"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case12 delivered to supervisor-a via pass-1" "$TMP/recv12.txt" 'WORKER INTERRUPTED'
+D12=$(json_field "$P3/.supervisor/$SID_A/interrupts.jsonl" "objs[-1]['delivered']")
+assert_eq "case12 shard A ledger delivered=true" "True" "$D12"
+if [ ! -f "$P3/.supervisor/$SID_B/interrupts.jsonl" ]; then
+  pass "case12 shard B untouched"; else fail "case12 shard B written"; fi
+if [ ! -f "$P3/.supervisor/interrupts.jsonl" ]; then
+  pass "case12 no flat write"; else fail "case12 flat written"; fi
+
+# ---------- case 12b: double-hit with DIFFERENT registered_at -> latest wins ----------
+# register supervisor-b's live session first (pass-1 needs it to deliver)
+SUPB_SOCK="$TMP/supb.sock"
+python3 - "$TMP/sessions" "$SUPB_SOCK" "$SID_B" "$P3" <<'EOF'
+import json, sys
+d, sock, sid, proj = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+json.dump({"pid": 66666, "sessionId": sid, "cwd": proj,
+           "messagingSocketPath": sock, "name": "supervisor-b",
+           "updatedAt": 9999999999999,
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/66666.json", "w"))
+json.dump({"peerToken": "token-b",
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/66666.xyz.key", "w"))
+EOF
+# worker w-sid-late registered in shard A (older) AND shard B (newer):
+# interrupt must go to shard B (the latest registration), never A.
+addworker "$P3/.supervisor/$SID_A/state.json" "w-sid-late" "2026-09-04T10:00:00"
+addworker "$P3/.supervisor/$SID_B/state.json" "w-sid-late" "2026-09-04T12:00:00"
+start_server "$SUPB_SOCK" "$TMP/recv12b.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-late","cwd":"'"$P3"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case12b delivered to shard B (latest registered_at)" "$TMP/recv12b.txt" 'WORKER INTERRUPTED'
+if [ -f "$P3/.supervisor/$SID_A/interrupts.jsonl" ]; then
+  assert_not_contains "case12b shard A (older) not written" "$P3/.supervisor/$SID_A/interrupts.jsonl" "w-sid-late"
+else
+  pass "case12b shard A not written at all"
+fi
+# clean the late worker out of shard A to keep later cases' baseline intact
+python3 - "$P3/.supervisor/$SID_A/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]
+st = json.load(open(p))
+st["workers"] = [w for w in st.get("workers", []) if w.get("session_id") != "w-sid-late"]
+json.dump(st, open(p, "w"))
+EOF
+rm -f "$P3/.supervisor/$SID_B/interrupts.jsonl"
+
+# ---------- case 13: no shard match + double-hit ambiguity ----------
+N13=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
+fire_hook '{"hook_event_name":"StopFailure","session_id":"stranger-sid","cwd":"'"$P3"'","error":"429"}'
+N13B=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
+assert_eq "case13a stranger sid -> no shard write" "$N13" "$N13B"
+if [ ! -f "$P3/.supervisor/$SID_B/interrupts.jsonl" ]; then
+  pass "case13a shard B still untouched"; else fail "case13a shard B written"; fi
+
+# same worker sid in BOTH shards with equal registered_at -> ambiguity
+addworker "$P3/.supervisor/$SID_A/state.json" "w-sid-2" "2026-09-04T12:00:00"
+addworker "$P3/.supervisor/$SID_B/state.json" "w-sid-2" "2026-09-04T12:00:00"
+ERR13=$(fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-2","cwd":"'"$P3"'","error":"429"}' 2>&1 1>/dev/null)
+RC13=$?
+assert_eq "case13b ambiguous double-hit exit 0" "0" "$RC13"
+case "$ERR13" in
+  *matches*) pass "case13b ambiguity logged to stderr" ;;
+  *) fail "case13b ambiguity stderr missing (got: $ERR13)" ;;
+esac
+N13C=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
+assert_eq "case13b ambiguous -> no ledger write (A)" "$N13" "$N13C"
+if [ ! -f "$P3/.supervisor/$SID_B/interrupts.jsonl" ]; then
+  pass "case13b ambiguous -> no ledger write (B)"; else fail "case13b shard B written"; fi
+
+# ---------- case 14: flat-only project (zero shards) ----------
+P4="$TMP/proj4"
+mkdir -p "$P4/.supervisor"
+mkstate "$P4/.supervisor/state.json" "$P4" "supervisor-a" "$SID_A" "w-sid-4" "2026-09-04T10:00:00"
+start_server "$SUPA_SOCK" "$TMP/recv14.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-4","cwd":"'"$P4"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case14 flat delivery" "$TMP/recv14.txt" 'WORKER INTERRUPTED'
+D14=$(json_field "$P4/.supervisor/interrupts.jsonl" "objs[-1]['delivered']")
+assert_eq "case14 flat delivered=true" "True" "$D14"
+
+# ---------- case 15: linked worktree discovery ----------
+WTMAIN="$TMP/wtmain"; WTLINK="$TMP/wtlink"
+git init -q "$WTMAIN"
+mkdir -p "$WTMAIN/.supervisor/$SID_A"
+mkstate "$WTMAIN/.supervisor/$SID_A/state.json" "$WTMAIN" "supervisor-a" "sup-wt-dead" "w-sid-7" "2026-09-04T10:00:00"
+git -C "$WTMAIN" -c user.email=t@t -c user.name=t commit --allow-empty -qm init
+git -C "$WTMAIN" worktree add -q "$WTLINK" -b wt-branch
+mkdir -p "$WTLINK/src"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-7","cwd":"'"$WTLINK/src"'","error":"429 rate limited"}'
+if [ -f "$WTMAIN/.supervisor/$SID_A/interrupts.jsonl" ]; then
+  pass "case15 worktree interrupt landed in main-worktree shard"
+else fail "case15 no ledger in main worktree shard"; fi
+if [ ! -e "$WTLINK/.supervisor" ]; then
+  pass "case15 nothing created inside worktree"; else fail "case15 .supervisor created in worktree"; fi
+
+# ---------- case 16: archive/ invisible to shard scanning ----------
+mkdir -p "$P3/.supervisor/archive/old-round"
+mkstate "$P3/.supervisor/archive/old-round/state.json" "$P3" "supervisor-a" "$SID_A" "w-sid-arch" "2026-09-01T10:00:00"
+N16=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-arch","cwd":"'"$P3"'","error":"429"}'
+N16B=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
+assert_eq "case16 archive worker -> no shard write" "$N16" "$N16B"
+if [ ! -f "$P3/.supervisor/archive/old-round/interrupts.jsonl" ]; then
+  pass "case16 archive dir never written"; else fail "case16 archive written"; fi
+
+# ---------- case 17: name collision + dead target sid + shards>1 -> pass-2 disabled ----------
+python3 - "$P3/.supervisor/$SID_A/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]
+st = json.load(open(p)); st["supervisor_session_id"] = "sup-dead-sid"
+json.dump(st, open(p, "w"))
+EOF
+# decoy: same NAME as shard A's supervisor, cwd == project_dir, REAL listener.
+# Old pass-2 would deliver to it; v3 must not (n_shards=2 -> pass-2 disabled).
+SUPD_SOCK="$TMP/supd.sock"
+python3 - "$TMP/sessions" "$SUPD_SOCK" "$P3" <<'EOF'
+import json, sys
+d, sock, proj = sys.argv[1], sys.argv[2], sys.argv[3]
+json.dump({"pid": 44444, "sessionId": "decoy-sid", "cwd": proj,
+           "messagingSocketPath": sock, "name": "supervisor-a",
+           "updatedAt": 9999999999999,
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/44444.json", "w"))
+EOF
+start_server "$SUPD_SOCK" "$TMP/recv17.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-1","cwd":"'"$P3"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+if grep -qF 'WORKER INTERRUPTED' "$TMP/recv17.txt"; then
+  fail "case17 delivered to same-name decoy (pass-2 must be disabled)"
+else pass "case17 pass-2 disabled with shards>1 (no delivery)"; fi
+D17=$(json_field "$P3/.supervisor/$SID_A/interrupts.jsonl" "objs[-1]['delivered']")
+assert_eq "case17 delivered=false, still persisted" "False" "$D17"
+
+# ---------- case 18: shards exist + sid zero-hit -> flat fallback channel (P1-3) ----------
+N18=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
+mkstate "$P3/.supervisor/state.json" "$P3" "supervisor-a" "$SID_A" "w-sid-flat" "2026-09-04T10:00:00"
+start_server "$SUPA_SOCK" "$TMP/recv18.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-flat","cwd":"'"$P3"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case18 flat-channel delivery" "$TMP/recv18.txt" 'WORKER INTERRUPTED'
+D18=$(json_field "$P3/.supervisor/interrupts.jsonl" "objs[-1]['delivered']")
+assert_eq "case18 flat fallback delivered=true" "True" "$D18"
+N18B=$(grep -c . "$P3/.supervisor/$SID_A/interrupts.jsonl" || true)
+assert_eq "case18 shard A untouched by flat worker" "$N18" "$N18B"
+
+# ---------- case 18b: upgrade window (1 shard + flat) -> pass-2 disabled ----------
+# v2 flat ledger still on disk (its supervisor sid is DEAD), one v3 shard whose
+# same-NAME supervisor is alive and listening. Old code only disabled pass-2 at
+# n_shards>1 and would misdeliver the v2 worker's interrupt to the v3 stranger.
+# Drop shard B first so this case runs with EXACTLY ONE shard.
+rm -rf "$P3/.supervisor/$SID_B"
+python3 - "$P3/.supervisor/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]
+st = json.load(open(p))
+st["supervisor_session_id"] = "v2-dead-sid"  # v2 supervisor is gone
+json.dump(st, open(p, "w"))
+EOF
+start_server "$SUPA_SOCK" "$TMP/recv18b.txt"
+fire_hook '{"hook_event_name":"StopFailure","session_id":"w-sid-flat","cwd":"'"$P3"'","error":"429 rate limited"}'
+wait $SERVER_PID 2>/dev/null || true
+if grep -qF 'WORKER INTERRUPTED' "$TMP/recv18b.txt"; then
+  fail "case18b upgrade-window misdelivery to same-name v3 supervisor"
+else pass "case18b pass-2 disabled with 1 shard (upgrade window safe)"; fi
+D18B=$(json_field "$P3/.supervisor/interrupts.jsonl" "objs[-1]['delivered']")
+assert_eq "case18b flat interrupt persisted delivered=false" "False" "$D18B"
+
+# ---------- case 19: shard guard blocks registry.json direct write ----------
+echo '{"session_id":"'"$SID_A"'","tool_name":"Write","tool_input":{"file_path":"'"$P3"'/.supervisor/registry.json"}}' \
+  | python3 "$GUARD" 2>"$TMP/g19.err"
+assert_eq "case19 guard registry.json exit 2" "2" "$?"
+assert_contains "case19 guard stderr points to registry.py" "$TMP/g19.err" 'registry.py'
+
+# ---------- case 20: injector startup / resume / silent-failure ----------
+OUT20=$(echo '{"session_id":"inj-sid-1","source":"startup","cwd":"'"$TMP"'"}' | python3 "$INJ")
+assert_eq "case20 injector startup single line" "SESSION_ID inj-sid-1 startup" "$OUT20"
+OUT20B=$(echo '{"session_id":"inj-sid-1","source":"resume","cwd":"'"$TMP"'"}' | python3 "$INJ")
+assert_eq "case20 injector resume without .supervisor -> no hint" "SESSION_ID inj-sid-1 resume" "$OUT20B"
+echo '{"session_id":"inj-sid-2","source":"resume","cwd":"'"$P3"'"}' | python3 "$INJ" > "$TMP/inj20.txt" 2>/dev/null
+assert_contains "case20 injector resume hint line" "$TMP/inj20.txt" 'registry.json'
+L20=$(grep -c . "$TMP/inj20.txt" || true)
+assert_eq "case20 injector resume emits exactly 2 lines" "2" "$L20"
+echo 'not json' | python3 "$INJ" > "$TMP/inj20c.txt" 2>/dev/null
+assert_eq "case20 injector garbage exit 0" "0" "$?"
+assert_eq "case20 injector garbage no output" "0" "$(grep -c . "$TMP/inj20c.txt" || true)"
+
+# ---------- case 21: shard guard allow/deny/short-circuit ----------
+echo '{"session_id":"'"$SID_A"'","tool_name":"Write","tool_input":{"file_path":"'"$P3/.supervisor/$SID_A"'/state.json"}}' \
+  | python3 "$GUARD" 2>"$TMP/g21a.err"
+assert_eq "case21 own shard write allowed" "0" "$?"
+assert_eq "case21 own shard no stderr" "0" "$(grep -c . "$TMP/g21a.err" || true)"
+echo '{"session_id":"00000000-0000-0000-0000-000000000000","tool_name":"Write","tool_input":{"file_path":"'"$P3/.supervisor/$SID_A"'/state.json"}}' \
+  | python3 "$GUARD" 2>"$TMP/g21b.err"
+assert_eq "case21 wrong sid write denied (exit 2)" "2" "$?"
+assert_contains "case21 deny stderr has DENIED_BY_GUARD" "$TMP/g21b.err" 'DENIED_BY_GUARD'
+assert_contains "case21 deny stderr shows correct sid" "$TMP/g21b.err" "$SID_A"
+echo 'not json {"file_path":"/tmp/foo.py"}' | python3 "$GUARD" 2>/dev/null
+assert_eq "case21 short-circuit garbage stdin exit 0" "0" "$?"
+echo '{"session_id":"x","tool_name":"Write","tool_input":{"file_path":"/tmp/foo.py"}}' | python3 "$GUARD" 2>/dev/null
+assert_eq "case21 ordinary file exit 0" "0" "$?"
+echo 'garbage with .supervisor/ inside {"file_path":"'"$P3/.supervisor/$SID_A"'/x"}' | python3 "$GUARD" 2>/dev/null
+assert_eq "case21 unparseable-but-suspect exits 0 (never block on garbage)" "0" "$?"
+echo '{"session_id":"x","tool_name":"Write","tool_input":{"file_path":"'"$P3"'/.supervisor/archive/old-round/state.json"}}' | python3 "$GUARD" 2>/dev/null
+assert_eq "case21 archive write allowed" "0" "$?"
+echo '{"session_id":"x","tool_name":"Write","tool_input":{"file_path":"'"$P4"'/.supervisor/state.json"}}' | python3 "$GUARD" 2>/dev/null
+assert_eq "case21 flat state.json write allowed" "0" "$?"
+
+# ---------- cases 22-27: stop-anomaly-capture.py (Stop hook) ----------
+# Sandbox: same fake sessions dir + same flat ledger (worker-session-1 is a
+# registered worker, supervisor-session-1 has a live socket). Transcript
+# fixtures are built per case in $TMP/trXX.jsonl.
+ANOM="$HOOK_DIR/stop-anomaly-capture.py"
+
+fire_anom() { # payload-json
+  echo "$1" | CLAUDE_SUPERVISOR_SESSIONS_DIR="$TMP/sessions" python3 "$ANOM"
+}
+
+# case 22: model-error turn -> immediate delivery + interrupts.jsonl entry
+TR22="$TMP/tr22.jsonl"
+python3 - "$TR22" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"do it"},
+   "timestamp":"2026-09-07T23:00:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"working"}]},"timestamp":"2026-09-07T23:00:05Z"},
+  {"type":"user","message":{"role":"user","content":"next turn"},
+   "timestamp":"2026-09-07T23:02:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"error",
+   "content":[{"type":"text","text":"Sorry, I encountered an error"}]},
+   "timestamp":"2026-09-07T23:02:43Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+start_server "$SUP_SOCK" "$TMP/received22.txt"
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR22"'"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case22 model-error delivered" "$TMP/received22.txt" 'WORKER INTERRUPTED'
+assert_contains "case22 kind=model-error" "$TMP/received22.txt" 'kind: model-error'
+K22=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case22 ledger kind model-error" "model-error" "$K22"
+D22=$(json_field "$interrupts" "objs[-1]['delivered']")
+assert_eq "case22 delivered=true" "True" "$D22"
+
+# case 23: healthy turn -> no alert, no write, and streak state stays clean
+TR23="$TMP/tr23.jsonl"
+python3 - "$TR23" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"do it"},
+   "timestamp":"2026-09-07T10:00:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-opus",
+   "content":[{"type":"text","text":"thinking"},
+              {"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+   "timestamp":"2026-09-07T10:00:05Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"ok"}]},
+   "timestamp":"2026-09-07T10:00:07Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-opus",
+   "content":[{"type":"text","text":"done, committed"}]},
+   "timestamp":"2026-09-07T10:00:09Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+N23=$(grep -c . "$interrupts" || true)
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR23"'"}'
+assert_eq "case23 healthy turn no write" "$N23" "$(grep -c . "$interrupts" || true)"
+# note: anomaly_state.json may legitimately exist as {} after case 22's
+# delivery (delivery pops the streak key but keeps the file); the correct
+# healthy invariant is "no streak key", not "no file"
+S23=$(python3 -c "
+import json, os
+p = '$PROJ/.supervisor/anomaly_state.json'
+d = json.load(open(p)) if os.path.exists(p) else {}
+print(d.get('empty_streak:worker-session-1', 'gone'))")
+assert_eq "case23 healthy turn carries no streak key" "gone" "$S23"
+
+# case 24: empty-turn:full single hit -> suppressed (streak=1, no delivery)
+TR24="$TMP/tr24.jsonl"
+python3 - "$TR24" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"patrol"},
+   "timestamp":"2026-09-07T13:20:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":""}]},"timestamp":"2026-09-07T13:23:00Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+N24=$(grep -c . "$interrupts" || true)
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR24"'"}'
+assert_eq "case24 full single hit suppressed" "$N24" "$(grep -c . "$interrupts" || true)"
+S24=$(python3 -c "import json;d=json.load(open('$PROJ/.supervisor/anomaly_state.json'));print(d.get('empty_streak:worker-session-1'))")
+assert_eq "case24 streak recorded =1" "1" "$S24"
+
+# case 24b: second consecutive full hit -> delivered
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR24"'"}'
+N24B=$((N24+1))
+assert_eq "case24b full second hit delivered" "$N24B" "$(grep -c . "$interrupts" || true)"
+K24B=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case24b kind empty-turn:full" "empty-turn:full" "$K24B"
+
+# case 25: empty-turn:tail single hit -> delivered immediately
+TR25="$TMP/tr25.jsonl"
+python3 - "$TR25" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"continue phase 3"},
+   "timestamp":"2026-09-07T10:50:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"editing file"},
+              {"type":"tool_use","id":"t1","name":"Edit","input":{}}]},
+   "timestamp":"2026-09-07T10:50:10Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"ok"}]},
+   "timestamp":"2026-09-07T10:50:12Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"\u2026"}]},
+   "timestamp":"2026-09-07T10:52:00Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+start_server "$SUP_SOCK" "$TMP/received25.txt"
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR25"'"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case25 tail single hit delivered" "$TMP/received25.txt" 'kind: empty-turn:tail'
+K25=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case25 ledger kind tail" "empty-turn:tail" "$K25"
+
+# case 26: healthy turn after anomaly -> streak reset
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR23"'"}'
+S26=$(python3 -c "
+import json, os
+p = '$PROJ/.supervisor/anomaly_state.json'
+d = json.load(open(p)) if os.path.exists(p) else {}
+print(d.get('empty_streak:worker-session-1', 'gone'))")
+assert_eq "case26 healthy turn resets streak" "gone" "$S26"
+
+# case 27: unsupervised session (stranger sid) -> zero interference
+TR27="$TMP/tr27.jsonl"
+cp "$TR22" "$TR27"
+N27=$(grep -c . "$interrupts" || true)
+fire_anom '{"hook_event_name":"Stop","session_id":"some-random-session","cwd":"'"$PROJ"'","transcript_path":"'"$TR27"'"}'
+assert_eq "case27 stranger session no write" "$N27" "$(grep -c . "$interrupts" || true)"
+
+# case 28: tail window growth -- boundary sits beyond the initial 64KB
+# window (huge tool_result fills the tail); the tool_work must be INSIDE
+# the last turn for tail classification: user "now finish" -> tool_use ->
+# huge tool_result -> assistant "…". The 200KB tool_result pushes the
+# boundary user record out of the first scan window.
+TR28="$TMP/tr28.jsonl"
+python3 - "$TR28" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"big work"},
+   "timestamp":"2026-09-07T11:00:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-opus",
+   "content":[{"type":"text","text":"reading"},
+              {"type":"tool_use","id":"t0","name":"Read","input":{}}]},
+   "timestamp":"2026-09-07T11:00:05Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t0","content":"y" * 100000}]},
+   "timestamp":"2026-09-07T11:00:07Z"},
+  {"type":"user","message":{"role":"user","content":"now finish"},
+   "timestamp":"2026-09-07T11:01:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"working"},
+              {"type":"tool_use","id":"t1","name":"Edit","input":{}}]},
+   "timestamp":"2026-09-07T11:01:05Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"x" * 200000}]},
+   "timestamp":"2026-09-07T11:01:07Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"…"}]},
+   "timestamp":"2026-09-07T11:01:10Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+start_server "$SUP_SOCK" "$TMP/received28.txt"
+fire_anom '{"hook_event_name":"Stop","session_id":"worker-session-1","cwd":"'"$PROJ"'","transcript_path":"'"$TR28"'"}'
+wait $SERVER_PID 2>/dev/null || true
+assert_contains "case28 window growth finds boundary -> tail delivered" "$TMP/received28.txt" 'kind: empty-turn:tail'
+K28=$(json_field "$interrupts" "objs[-1]['kind']")
+assert_eq "case28 ledger kind tail (not full: earlier turn had tools)" "empty-turn:tail" "$K28"
+
+# case 29: stop-anomaly git fallback -- anomaly turn in a linked worktree
+# must find the MAIN worktree's shard (regression for the missing-dirname
+# bug where root pointed at .git/ itself and the fallback never resolved)
+# reuse case 15's wtmain/wtlink fixture (still on disk)
+WT_TR="$TMP/tr29.jsonl"
+python3 - "$WT_TR" <<'EOF'
+import json, sys
+recs = [
+  {"type":"user","message":{"role":"user","content":"continue"},
+   "timestamp":"2026-09-07T12:45:00Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"claude-k3",
+   "content":[{"type":"text","text":"editing"},
+              {"type":"tool_use","id":"t1","name":"Edit","input":{}}]},
+   "timestamp":"2026-09-07T12:45:10Z"},
+  {"type":"user","message":{"role":"user","content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"ok"}]},
+   "timestamp":"2026-09-07T12:45:12Z"},
+  {"type":"assistant","message":{"role":"assistant","model":"error",
+   "content":[{"type":"text","text":"Sorry, I encountered an error"}]},
+   "timestamp":"2026-09-07T12:46:22Z"},
+]
+with open(sys.argv[1], "w") as f:
+    for r in recs:
+        f.write(json.dumps(r) + "\n")
+EOF
+fire_anom '{"hook_event_name":"Stop","session_id":"w-sid-7","cwd":"'"$WTLINK/src"'","transcript_path":"'"$WT_TR"'"}'
+if [ -f "$WTMAIN/.supervisor/$SID_A/interrupts.jsonl" ] \
+   && [ "$(grep -c 'model-error' "$WTMAIN/.supervisor/$SID_A/interrupts.jsonl" || true)" -ge 1 ]; then
+  pass "case29 worktree anomaly landed in main-worktree shard"
+else fail "case29 worktree anomaly NOT delivered to main-worktree shard (git fallback broken)"; fi
+if [ ! -e "$WTLINK/.supervisor" ]; then
+  pass "case29 nothing created inside worktree"; else fail "case29 .supervisor created in worktree"; fi
+
+# cleanup anomaly fixtures so the shared sandbox stays pristine for reruns
+rm -f "$PROJ/.supervisor/anomaly_state.json"
+
 # ---------- summary ----------
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

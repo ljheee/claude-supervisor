@@ -1,1 +1,8 @@
 .DS_Store
+hooks/__pycache__/
+
+# 监工账本，永不入库
+.supervisor/
+
+# Claude Code 本地会话产物
+.claude/

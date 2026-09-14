@@ -1,42 +1,91 @@
 #!/usr/bin/env bash
 # Assertion-based regression test for supervisor-watchdog.
-# Sandboxed: fake project state + fake agent-mail CLI; never touches real data.
+# Sandboxed: fake project state + fake ~/.claude/sessions registry + local
+# UDS servers standing in for the supervisor messaging sockets; never touches
+# real data. (v3: delivery goes over UDS by supervisor session_id, so the old
+# fake CLI harness was replaced; the semantic assertions of every
+# legacy case are preserved verbatim.)
 set -uo pipefail
 
-WD_SRC="${1:-$HOME/.agent-mail/supervisor-watchdog}"
+WD_SRC="${1:-$HOME/.claude/supervisor/supervisor-watchdog}"
 FAILURES=0
 TMP=""
+SERVER_PIDS=""
 
-cleanup() { [ -n "$TMP" ] && [ -d "$TMP" ] && rm -rf "$TMP"; }
+cleanup() {
+  [ -n "$SERVER_PIDS" ] && kill $SERVER_PIDS 2>/dev/null
+  [ -n "$TMP" ] && [ -d "$TMP" ] && rm -rf "$TMP"
+}
 trap cleanup EXIT
 
 fail() { echo "FAIL: $1"; FAILURES=$((FAILURES+1)); }
 pass() { echo "ok:   $1"; }
 assert_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected: $2, got: $3)"; fi; }
 assert_contains() { if grep -qF -- "$3" "$2" 2>/dev/null; then pass "$1"; else fail "$1 (needle '$3' not found)"; fi; }
-assert_not_contains() { if grep -qF -- "$3" "$2" 2>/dev/null; then fail "$1 (unexpected needle '$3')"; else pass "$1"; fi; }
+assert_not_contains() { if grep -qF -- "$3" "$2" 2>/dev/null; then fail "$1" "(unexpected needle '$3')"; else pass "$1"; fi; }
 
 TMP=$(mktemp -d /tmp/wdtest.XXXX)
 PROJ="$TMP/proj"
-MAIL="$TMP/mailhome"
-mkdir -p "$PROJ/.supervisor" "$MAIL/inbox"
+SESSIONS="$TMP/sessions"
+SUP_SOCK="$TMP/sup.sock"
+SUP2_SOCK="$TMP/sup2.sock"
+mkdir -p "$PROJ/.supervisor" "$SESSIONS"
+export CLAUDE_SUPERVISOR_WATCHDOG_NO_NOTIFY=1
 
-# Deploy the watchdog under test INTO the fake mail home, mimicking the real
-# layout (~/.agent-mail/supervisor-watchdog sits next to agent-mail). This
-# matters: the script prefers the CLI in its own directory, so testing the
-# source path directly would bypass our fake CLI entirely.
-WD="$MAIL/supervisor-watchdog"
-cp "$WD_SRC" "$WD"
-
-# fake agent-mail CLI that records sends to a spool
-cat > "$MAIL/agent-mail" <<'EOF'
-#!/usr/bin/env bash
-# usage: agent-mail send <to> <body...> --from NAME
-TO="$1"; shift
-printf '%s\n---MSG-END---\n' "$*" >> "${SPOOL:-/tmp/wdspool}"
-exit 0
+# persistent UDS server: accepts any number of connections, appends each
+# received payload to the spool file
+start_server() { # sock spool
+  python3 - "$1" "$2" <<'EOF' >/dev/null 2>&1 &
+import socket, sys, os, threading
+sock_path, spool = sys.argv[1], sys.argv[2]
+try: os.unlink(sock_path)
+except OSError: pass
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(sock_path); s.listen(5)
+open(spool + ".ready", "w").write("1")
+lock = threading.Lock()
+def handle(conn):
+    data = b""
+    try:
+        while True:
+            c = conn.recv(65536)
+            if not c: break
+            data += c
+    except OSError:
+        pass
+    with lock:
+        with open(spool, "ab") as f:
+            f.write(data)
+    conn.close()
+while True:
+    try:
+        conn, _ = s.accept()
+    except OSError:
+        break
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
 EOF
-chmod +x "$MAIL/agent-mail"
+  SERVER_PIDS="$SERVER_PIDS $!"
+  for _ in $(seq 1 50); do
+    [ -f "$2.ready" ] && break
+    sleep 0.1
+  done
+}
+
+# fake session registry entry: supervisor with sid listening on sock
+mk_sess() { # pid sid sock [cwd]
+  python3 - "$SESSIONS" "$1" "$2" "$3" "${4:-$PROJ}" <<'EOF'
+import json, sys
+d, pid, sid, sock, cwd = sys.argv[1:6]
+json.dump({"pid": int(pid), "sessionId": sid, "cwd": cwd,
+           "messagingSocketPath": sock, "name": "sup-" + sid[:8],
+           "updatedAt": 9999999999999,
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/" + pid + ".json", "w"))
+json.dump({"peerToken": "tok-" + sid[:8],
+           "procStart": "Mon Sep  1 00:00:00 2026"},
+          open(d + "/" + pid + ".x.key", "w"))
+EOF
+}
 
 OLD=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=120)).isoformat())")
 NEW=$(python3 -c "import datetime;print(datetime.datetime.now().isoformat())")
@@ -48,20 +97,22 @@ write_state() { # json-body
 }
 
 run_wd() { # threshold
-  SPOOL="$MAIL/spool" AGENT_MAIL_HOME="$MAIL" bash "$WD" "$PROJ" "${1:-60}"
+  CLAUDE_SUPERVISOR_SESSIONS_DIR="$SESSIONS" bash "$WD_SRC" "$PROJ" "${1:-60}"
 }
 
-SPOOL="$MAIL/spool"; export SPOOL
+SPOOL="$TMP/spool.txt"
+
+# ---- legacy flat-layout cases ride on one supervisor socket ----
+start_server "$SUP_SOCK" "$SPOOL"
+mk_sess 60001 "sup-sid-1" "$SUP_SOCK"
 
 # ---- case A: overdue worker (Z-suffixed ISO ts) -> alert with session_id ----
 write_state <<EOF
-{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup",
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
  "workers":[{"name":"w1","session_id":"sid-w1","phase":"dev-2",
    "registered_at":"$OLD","last_report_ts":"$OLD","last_instruction_ts":"$NEW"}],
  "reviews":[],"done":false}
 EOF
-# fake supervisor registered in agent-mail (send requires registered target)
-echo '{"sup":{"type":"claude","session_id":"s","cwd":"'$PROJ'","registered_at":"x"}}' > "$MAIL/agents.json"
 run_wd 60
 assert_contains "A: alert sent" "$SPOOL" "WATCHDOG ALERT"
 assert_contains "A: alert has session_id" "$SPOOL" "sid-w1"
@@ -75,44 +126,55 @@ N2=$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)
 assert_eq "B: no duplicate alert at same silence level" "$N1" "$N2"
 
 # ---- case C: instruction_ts newer than report_ts must NOT suppress alert ----
-# (already covered by case A: instruction ts is NEW but alert fired anyway)
-pass "C: last_instruction_ts ignored (case A proved it)"
+# independent assertion: report old (overdue), instruction BRAND NEW, no
+# prior response -> must still alert (a supervisor STATUS CHECK never
+# resets the silence clock)
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"w-c","session_id":"sid-w-c","phase":"dev-1",
+   "registered_at":"$OLD","last_report_ts":"$OLD","last_instruction_ts":"$NEW"}],
+ "reviews":[],"done":false}
+EOF
+run_wd 60
+assert_contains "C: fresh instruction_ts does not reset silence" "$SPOOL" "WATCHDOG ALERT"
 
 # ---- case D: fresh worker -> no alert ----
 write_state <<EOF
-{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup",
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
  "workers":[{"name":"w2","session_id":"sid-w2","phase":"dev-1",
    "registered_at":"$NEW","last_report_ts":"$NEW"}],
  "reviews":[],"done":false}
 EOF
-rm -f "$SPOOL"
+N3=$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)
 run_wd 60
-if [ -f "$SPOOL" ]; then fail "D: fresh worker should not alert"; else pass "D: fresh worker silent"; fi
+N4=$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)
+assert_eq "D: fresh worker silent" "$N3" "$N4"
 
 # ---- case E: worker response resets silence (last_response_ts) ----
 write_state <<EOF
-{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup",
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
  "workers":[{"name":"w2","session_id":"sid-w2","phase":"dev-1",
    "registered_at":"$OLD","last_report_ts":"$OLD","last_response_ts":"$NEW"}],
  "reviews":[],"done":false}
 EOF
 run_wd 60
-if [ -f "$SPOOL" ]; then fail "E: recent response should not alert"; else pass "E: last_response_ts resets silence"; fi
+assert_eq "E: last_response_ts resets silence" "$N4" "$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)"
 
 # ---- case F: done project -> silent ----
 write_state <<EOF
-{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup",
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
  "workers":[{"name":"w1","session_id":"sid-w1","phase":"dev-2",
    "registered_at":"$OLD","last_report_ts":"$OLD"}],
  "reviews":[],"done":true}
 EOF
 run_wd 60
-if [ -f "$SPOOL" ]; then fail "F: done project should not alert"; else pass "F: done project silent"; fi
+assert_eq "F: done project silent" "$N4" "$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)"
 
 # ---- case G: garbage threshold / bad dir -> exit 0, no output ----
 OUT=$(run_wd "notanumber" 2>&1); RC=$?
 assert_eq "G: bad threshold exit 0" "0" "$RC"
-OUT=$(AGENT_MAIL_HOME="$MAIL" bash "$WD" /nonexistent 60 2>&1); RC=$?
+OUT=$(CLAUDE_SUPERVISOR_SESSIONS_DIR="$SESSIONS" bash "$WD_SRC" /nonexistent 60 2>&1); RC=$?
 assert_eq "G: bad dir exit 0" "0" "$RC"
 
 # ---- case H: corrupt state.json (half-written) -> exit 0 silently ----
@@ -127,7 +189,7 @@ assert_eq "I: workers non-list exit 0" "0" "$RC"
 
 # ---- case J: escalation ladder: silence grew another threshold -> re-alert ----
 write_state <<EOF
-{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup",
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
  "workers":[{"name":"w1","session_id":"sid-w1","phase":"dev-2",
    "registered_at":"$OLD","last_report_ts":"$OLD"}],
  "reviews":[],"done":false}
@@ -140,13 +202,227 @@ assert_contains "J: alert at 120min silence w/ threshold 50" "$SPOOL" "WATCHDOG 
 # ---- case K: Z-suffixed UTC timestamp (genuinely past) parses and alerts ----
 rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
 write_state <<EOF
-{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup",
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
  "workers":[{"name":"w3","session_id":"sid-w3","phase":"spec",
    "registered_at":"$OLDZ","last_report_ts":"$OLDZ"}],
  "reviews":[],"done":false}
 EOF
 run_wd 60
 assert_contains "K: RFC3339 Z timestamp parsed -> alert" "$SPOOL" "sid-w3"
+
+# ---- case O: escalation ladder re-alerts when silence grew another T ----
+# seeded: last alert at silence 70min, basis == current basis (worker ts
+# unchanged since) -> no ladder reset; silence now 120 >= 70+50 -> re-alert
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+OLD70=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=120)).isoformat())")
+python3 - "$PROJ/.supervisor/watchdog_state.json" "$OLD70" <<'EOF'
+import json, sys
+path, basis = sys.argv[1], sys.argv[2]
+json.dump({"sid-w-o": {"last_alert_silence_min": 70, "basis": basis,
+                       "last_alert_ts": "x"}}, open(path, "w"))
+EOF
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"w-o","session_id":"sid-w-o","phase":"dev-2",
+   "registered_at":"$OLD","last_report_ts":"$OLD"}],
+ "reviews":[],"done":false}
+EOF
+run_wd 50
+assert_contains "O: escalation re-alert at m>=prev+T (same basis)" "$SPOOL" "WATCHDOG ALERT"
+
+# ---- case P: worker RECOVERED (basis moved) -> ladder resets ----
+# seeded: last alert at silence 120min against the old basis; worker then
+# reported (basis moved to now-70min). New silence 70min < prev(120)+T,
+# yet this is a NEW episode -> must alert from scratch (threshold 60)
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+BASIS_OLD=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=150)).isoformat())")
+BASIS_NEW=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=70)).isoformat())")
+python3 - "$PROJ/.supervisor/watchdog_state.json" "$BASIS_OLD" <<'EOF'
+import json, sys
+path, basis = sys.argv[1], sys.argv[2]
+json.dump({"sid-w-p": {"last_alert_silence_min": 120, "basis": basis,
+                       "last_alert_ts": "x"}}, open(path, "w"))
+EOF
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"w-p","session_id":"sid-w-p","phase":"dev-2",
+   "registered_at":"$BASIS_NEW","last_report_ts":"$BASIS_NEW"}],
+ "reviews":[],"done":false}
+EOF
+run_wd 60
+assert_contains "P: recovery (basis moved) resets the ladder -> alert" "$SPOOL" "WATCHDOG ALERT"
+
+# ---- v3 shard layout ----
+SID_A="11111111-1111-1111-1111-111111111111"
+SID_B="22222222-2222-2222-2222-222222222222"
+
+# ---- case L: single shard behaves like the flat layout (same alert copy) ----
+rm -rf "$PROJ/.supervisor"
+mkdir -p "$PROJ/.supervisor/$SID_A"
+cat > "$PROJ/.supervisor/$SID_A/state.json" <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"w1","session_id":"sid-w1","phase":"dev-2",
+   "registered_at":"$OLD","last_report_ts":"$OLD"}],
+ "reviews":[],"done":false}
+EOF
+rm -f "$SPOOL"
+run_wd 60
+assert_contains "L: single shard alert delivered" "$SPOOL" "WATCHDOG ALERT"
+assert_contains "L: alert copy identical (session_id)" "$SPOOL" "sid-w1"
+assert_contains "L: alert copy identical (minutes)" "$SPOOL" "120"
+assert_contains "L: alert copy identical (escalation hint)" "$SPOOL" "STATUS CHECK"
+assert_contains "L: alert copy identical (resume hint)" "$SPOOL" "claude --resume"
+if [ -f "$PROJ/.supervisor/$SID_A/watchdog_state.json" ]; then
+  pass "L: dedup state lands inside the shard dir"; else fail "L: shard dedup state missing"; fi
+if [ ! -f "$PROJ/.supervisor/watchdog_state.json" ]; then
+  pass "L: no flat watchdog_state written"; else fail "L: flat watchdog_state written"; fi
+
+# ---- case M: dual shards -> independent alerts + isolated dedup states ----
+mkdir -p "$PROJ/.supervisor/$SID_B"
+SPOOL2="$TMP/spool2.txt"
+start_server "$SUP2_SOCK" "$SPOOL2"
+mk_sess 60002 "sup-sid-2" "$SUP2_SOCK"
+cat > "$PROJ/.supervisor/$SID_B/state.json" <<EOF
+{"goal":"g2","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-2",
+ "workers":[{"name":"wa","session_id":"sid-wa","phase":"dev-1",
+   "registered_at":"$OLD","last_report_ts":"$OLD"}],
+ "reviews":[],"done":false}
+EOF
+rm -f "$SPOOL" "$SPOOL2" "$PROJ/.supervisor/$SID_A/watchdog_state.json" "$PROJ/.supervisor/$SID_B/watchdog_state.json"
+run_wd 60
+assert_contains "M: shard A alerted its supervisor" "$SPOOL" "sid-w1"
+assert_contains "M: shard B alerted its supervisor" "$SPOOL2" "sid-wa"
+assert_not_contains "M: shard A alert did not cross to B's supervisor" "$SPOOL" "sid-wa"
+assert_not_contains "M: shard B alert did not cross to A's supervisor" "$SPOOL2" "sid-w1"
+# rerun: both suppressed by their own dedup state
+run_wd 60
+assert_eq "M: shard A dedup holds on rerun" "1" "$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)"
+assert_eq "M: shard B dedup holds on rerun" "1" "$(grep -c 'WATCHDOG ALERT' "$SPOOL2" || true)"
+
+# ---- case N: archive/ and non-UUID dirs are invisible ----
+mkdir -p "$PROJ/.supervisor/archive/old-round" "$PROJ/.supervisor/backup-not-uuid"
+cat > "$PROJ/.supervisor/archive/old-round/state.json" <<EOF
+{"goal":"old","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[{"name":"wold","session_id":"sid-wold","phase":"dev-1",
+   "registered_at":"$OLD","last_report_ts":"$OLD"}],
+ "reviews":[],"done":false}
+EOF
+cp "$PROJ/.supervisor/archive/old-round/state.json" "$PROJ/.supervisor/backup-not-uuid/state.json"
+NA=$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)
+run_wd 60
+assert_eq "N: archive worker never alerted" "$NA" "$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)"
+if [ ! -f "$PROJ/.supervisor/archive/old-round/watchdog_state.json" ]; then
+  pass "N: archive dir untouched"; else fail "N: archive dir written"; fi
+
+# ---- supervisor self-triage cases (v3.1): registry heartbeat x socket ----
+# heartbeat clock = .supervisor/registry.json entries[].heartbeat_ts (the
+# supervisor refreshes it on every patrol cron tick, by protocol).
+# NOTE: runs on the FLAT layout with the v3 shards removed (case M seeded
+# two shards earlier); self-triage must also work with zero workers - the
+# exact "supervisor died, nobody left watching" scenario.
+rm -rf "$PROJ/.supervisor/11111111-1111-1111-1111-111111111111" \
+       "$PROJ/.supervisor/22222222-2222-2222-2222-222222222222"
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+mk_reg() { # heartbeat_iso
+  cat > "$PROJ/.supervisor/registry.json" <<EOF
+{"supervisors":[{"session_id":"sup-sid-1","name":"sup","mode":"greenfield",
+  "goal":"g","heartbeat_ts":"$1","registered_at":"$1"}]}
+EOF
+}
+OUTF="$TMP/selftriage.out.txt"
+
+# ---- case Q: supervisor DEAD (heartbeat stale + NO session) -> DEAD notice ----
+# remove the fake session file: the supervisor session no longer exists
+rm -f "$SESSIONS/60001.json" "$SESSIONS/60001.x.key"
+rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
+STALE=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=95)).isoformat())")
+# no worker entry at all (self-triage must work even with zero workers)
+write_state <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup","supervisor_session_id":"sup-sid-1",
+ "workers":[],"reviews":[],"done":false}
+EOF
+mk_reg "$STALE"
+run_wd 60 > "$OUTF"
+assert_contains "Q: stale heartbeat + dead session -> SUPERVISOR DEAD" "$OUTF" "SUPERVISOR DEAD"
+assert_contains "Q: DEAD notice carries resume guidance" "$OUTF" "claude --resume"
+
+# ---- case R: supervisor DEGRADED (heartbeat stale + session alive) ----
+mk_sess 60001 "sup-sid-1" "$SUP_SOCK"
+rm -f "$PROJ/.supervisor/watchdog_state.json"
+run_wd 60 > "$OUTF"
+assert_contains "R: stale heartbeat + live socket -> SUPERVISOR DEGRADED" "$OUTF" "SUPERVISOR DEGRADED"
+assert_contains "R: DEGRADED notice asks for human intervention" "$OUTF" "人工介入"
+
+# ---- case S: fresh heartbeat + live session -> no self-triage alert ----
+rm -f "$PROJ/.supervisor/watchdog_state.json"
+FRESH=$(python3 -c "import datetime;print(datetime.datetime.now().isoformat())")
+mk_reg "$FRESH"
+run_wd 60 > "$OUTF"
+assert_not_contains "S: fresh heartbeat -> no supervisor alert" "$OUTF" "SUPERVISOR"
+grep -q . "$SPOOL" 2>/dev/null || : > "$SPOOL"   # ensure file exists for grep -c
+assert_eq "S: empty workers -> no worker alert either" "$(grep -c 'WATCHDOG ALERT' "$SPOOL" || true)" "0"
+
+# ---- case T: self-triage dedup ladder (same stale basis -> suppress;
+#      heartbeat moved but still stale -> re-alert from scratch) ----
+rm -f "$PROJ/.supervisor/watchdog_state.json"
+mk_reg "$STALE"
+run_wd 60 > /dev/null            # first alert
+run_wd 60 > "$OUTF"
+assert_not_contains "T: same basis within ladder step -> suppressed" "$OUTF" "SUPERVISOR"
+STALE2=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=75)).isoformat())")
+mk_reg "$STALE2"
+run_wd 60 > "$OUTF"
+assert_contains "T: heartbeat moved forward (recovered-ish) but still stale -> fresh alert" "$OUTF" "SUPERVISOR DEGRADED"
+
+# ---- case U: dual shards -> independent self-triage + per-shard dedup ----
+# shard dirs must be UUID-shaped (SHARD_NAME_RE); with shards present the
+# flat state.json is ignored entirely (shards-first enumeration).
+SID_A="aaaaaaaa-0000-0000-0000-000000000001"
+SID_B="bbbbbbbb-0000-0000-0000-000000000002"
+mkdir -p "$PROJ/.supervisor/$SID_A" "$PROJ/.supervisor/$SID_B"
+for sid in "$SID_A" "$SID_B"; do
+  cat > "$PROJ/.supervisor/$sid/state.json" <<EOF
+{"goal":"g","project_dir":"$PROJ","supervisor_name":"sup-$sid","supervisor_session_id":"$sid",
+ "workers":[],"reviews":[],"done":false}
+EOF
+done
+# both stale; A has a live socket (DEGRADED), B has none (DEAD)
+mk_sess 60002 "$SID_A" "$SUP_SOCK"
+mk_reg2() { # writes TWO entries with given heartbeat_isos
+  cat > "$PROJ/.supervisor/registry.json" <<EOF
+{"supervisors":[
+ {"session_id":"$SID_A","name":"sup-a","mode":"greenfield","goal":"g",
+  "heartbeat_ts":"$1","registered_at":"$1"},
+ {"session_id":"$SID_B","name":"sup-b","mode":"rework","goal":"g",
+  "heartbeat_ts":"$2","registered_at":"$2"}]}
+EOF
+}
+mk_reg2 "$STALE" "$STALE"
+OUTF="$TMP/dualshard.out.txt"
+run_wd 60 > "$OUTF"
+assert_contains "U: shard A stale+live socket -> DEGRADED" "$OUTF" "SUPERVISOR DEGRADED"
+assert_contains "U: shard A alert names its own sid" "$OUTF" "$SID_A"
+assert_contains "U: shard B stale+no session -> DEAD" "$OUTF" "SUPERVISOR DEAD"
+assert_contains "U: shard B alert names its own sid" "$OUTF" "$SID_B"
+assert_eq "U: one alert each, no cross-fire" "$(grep -c 'SUPERVISOR' "$OUTF" || true)" "2"
+# dedup lives in EACH shard's own watchdog_state.json -> second run silent
+run_wd 60 > "$OUTF"
+assert_not_contains "U: both shards suppressed on rerun" "$OUTF" "SUPERVISOR"
+[ -f "$PROJ/.supervisor/$SID_A/watchdog_state.json" ] \
+  && pass "U: shard A has own dedup state" || fail "U: shard A dedup state missing"
+[ -f "$PROJ/.supervisor/$SID_B/watchdog_state.json" ] \
+  && pass "U: shard B has own dedup state" || fail "U: shard B dedup state missing"
+# independent ladders: move B's heartbeat forward (still stale) -> only B re-alerts
+STALE_B2=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=75)).isoformat())")
+mk_reg2 "$STALE" "$STALE_B2"
+run_wd 60 > "$OUTF"
+assert_contains "U: B's moved heartbeat re-alerts (DEAD)" "$OUTF" "SUPERVISOR DEAD"
+assert_not_contains "U: A's unchanged basis stays suppressed" "$OUTF" "SUPERVISOR DEGRADED"
+
+# ---- cleanup self-triage fixtures (registry.json absent from earlier cases'
+#      premises; later files in this script never relied on it, remove anyway) ----
+rm -f "$PROJ/.supervisor/registry.json" "$PROJ/.supervisor/watchdog_state.json"
+rm -rf "$PROJ/.supervisor/$SID_A" "$PROJ/.supervisor/$SID_B"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$FAILURES assertion(s) FAILED - tmp preserved: $TMP"; trap - EXIT; exit 1; fi

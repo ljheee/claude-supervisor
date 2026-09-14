@@ -56,7 +56,7 @@ argument-hint: <改造目标> [--project-dir DIR] [--baseline <git-ref>]
 ## dev-N 特化（rework）
 
 - 你 APPROVE 前**必须亲自跑一次安全网对比**（不只信 worker 摘要——延续机械回放纪律）。
-- **范围比对（命令式动作，每次审查 dev 上报时必做）**：`git diff --name-only <本 phase 基线 commit>..HEAD` 与该 phase 声明范围比对，超出即 REFINE，无论改动多"合理"。submodule 内容变更同样计入比对。
+- **范围比对（命令式动作，每次审查 dev 上报时必做）**：`git status --porcelain`（未提交改动）与 `git diff --name-only <本 phase 基线 commit>..HEAD`（已 commit 改动——两者必须同时查，任一单独查都会漏：区间 diff 不含未提交改动）文件集与该 phase 声明范围比对，超出即 REFINE，无论改动多"合理"。submodule 内容变更同样计入比对。
 - 进入 dev-1 前确认工作区 clean（`git status --porcelain` 为空；非空则升级用户处置既有脏区，防止污染安全网基线与范围比对）。
 - 每 phase commit 即回滚锚点；REFINE 修复也独立 commit。
 

@@ -1,14 +1,34 @@
 #!/usr/bin/env bash
-# Install claude-supervisor slash commands for Claude Code (requires v2.1.224+ for
-# cross-session messaging: ListAgents + SendMessage; StopFailure hook needs
-# 2.1.259+ -- no official API to detect this, verify with `claude --version`).
+# Install claude-supervisor slash commands for Claude Code (requires
+# v2.1.259+ for cross-session messaging AND the StopFailure/SessionStart/
+# PreToolUse hooks used by v3 -- no official API to detect this, verify
+# with `claude --version`).
+#
+# Remote install (no clone needed):
+#   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/install.sh | sh
+# (the script detects it is running without a repo checkout and shallow-clones
+#  the repo into a temp dir; override the URL via the first argument or
+#  SUPERVISOR_REPO_URL)
 #
 #   /supervisor  - initialize the current session as the greenfield-mode supervisor
 #   /rework      - initialize the current session as the rework/refactor supervisor
+#   /research    - initialize the current session as the research/exploration supervisor
+#   /abstract    - initialize the current session as the abstract/synthesis supervisor
 #   /worker      - register the current session as a supervised worker
-#   watchdog     - external overdue-worker detector (installed to ~/.agent-mail)
+#   registry.py  - v3 discovery-layer helper (installed to
+#                  ~/.claude/supervisor, next to watchdog; all registry.json
+#                  writes go through it)
+#   watchdog     - external overdue-worker detector (installed to
+#                  ~/.claude/supervisor)
 #   StopFailure  - auto-report interrupted workers (hook, installed to
 #                  ~/.claude/hooks/claude-supervisor/ and registered in settings.json)
+#   Stop         - model-layer anomaly capture (model:error / empty-turn /
+#                  tail-degradation criteria, replay-verified; same UDS
+#                  delivery as StopFailure, registered at hooks.Stop)
+#   SessionStart - v3 identity injector: prints "SESSION_ID <uuid> <source>"
+#                  into every session's context (user-level registration)
+#   PreToolUse   - v3 shard guard for Write|Edit: blocks cross-shard writes
+#                  and direct registry.json edits (user-level registration)
 #
 # Command files are ASSEMBLED at install time: mode layer (frontmatter +
 # mode-specific sections) + commands/_core-supervisor.md (shared core protocol).
@@ -25,9 +45,22 @@
 #   - spliced commands failing structural assertions ABORT the install
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")" && pwd)"
+# Remote install support: `curl -fsSL <raw-install.sh-url> | sh` runs this
+# script WITHOUT a repo checkout next to it ($0 is the shell itself). Detect
+# the missing checkout and shallow-clone the repo into a temp dir first.
+#   - repo URL can be overridden: `... | sh -s -- <repo-url>` or
+#     SUPERVISOR_REPO_URL=<url> (default: https://github.com/ljheee/claude-supervisor.git)
+SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
+if [ ! -f "$SRC/commands/supervisor.md" ]; then
+  REPO_URL="${1:-${SUPERVISOR_REPO_URL:-https://github.com/ljheee/claude-supervisor.git}}"
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  echo "==> No repo checkout found next to the script; cloning $REPO_URL"
+  git clone --depth 1 "$REPO_URL" "$TMP/claude-supervisor" 1>&2
+  SRC="$TMP/claude-supervisor"
+fi
 DEST="$HOME/.claude/commands"
-MAIL_HOME="${AGENT_MAIL_HOME:-$HOME/.agent-mail}"
+SUPERVISOR_HOME="${SUPERVISOR_HOME:-$HOME/.claude/supervisor}"
 HOOK_DIR="$HOME/.claude/hooks/claude-supervisor"
 SETTINGS="$HOME/.claude/settings.json"
 CORE="$SRC/commands/_core-supervisor.md"
@@ -105,6 +138,8 @@ echo "==> Installing slash commands to $DEST (mode layer + core splice)"
 mkdir -p "$DEST"
 splice_command "$SRC/commands/supervisor.md" "$DEST/supervisor.md"
 splice_command "$SRC/commands/rework.md" "$DEST/rework.md"
+splice_command "$SRC/commands/research.md" "$DEST/research.md"
+splice_command "$SRC/commands/abstract.md" "$DEST/abstract.md"
 install_backup "$SRC/commands/worker.md" "$DEST/worker.md"
 
 # core file: reference copy in hooks dir ONLY (never into ~/.claude/commands/ --
@@ -113,21 +148,34 @@ echo "==> Installing core protocol reference copy to $HOOK_DIR/_core-supervisor.
 mkdir -p "$HOOK_DIR"
 install_backup "$CORE" "$HOOK_DIR/_core-supervisor.md"
 
-echo "==> Installing watchdog to $MAIL_HOME/supervisor-watchdog"
-mkdir -p "$MAIL_HOME"
-if [ -f "$MAIL_HOME/supervisor-watchdog" ] && \
-   ! cmp -s "$SRC/watchdog.sh" "$MAIL_HOME/supervisor-watchdog"; then
-  cp "$MAIL_HOME/supervisor-watchdog" "$MAIL_HOME/supervisor-watchdog.bak-${STAMP}"
+echo "==> Installing watchdog to $SUPERVISOR_HOME/supervisor-watchdog"
+mkdir -p "$SUPERVISOR_HOME"
+if [ -f "$SUPERVISOR_HOME/supervisor-watchdog" ] && \
+   ! cmp -s "$SRC/watchdog.sh" "$SUPERVISOR_HOME/supervisor-watchdog"; then
+  cp "$SUPERVISOR_HOME/supervisor-watchdog" "$SUPERVISOR_HOME/supervisor-watchdog.bak-${STAMP}"
   echo "  backed up existing supervisor-watchdog"
 fi
-install -m 755 "$SRC/watchdog.sh" "$MAIL_HOME/supervisor-watchdog"
+install -m 755 "$SRC/watchdog.sh" "$SUPERVISOR_HOME/supervisor-watchdog"
 
-echo "==> Installing StopFailure hook to $HOOK_DIR"
+echo "==> Installing registry.py to $SUPERVISOR_HOME/registry.py"
+if [ -f "$SUPERVISOR_HOME/registry.py" ] && \
+   ! cmp -s "$SRC/hooks/registry.py" "$SUPERVISOR_HOME/registry.py"; then
+  cp "$SUPERVISOR_HOME/registry.py" "$SUPERVISOR_HOME/registry.py.bak-${STAMP}"
+  echo "  backed up existing registry.py"
+fi
+# 755: core protocol invokes it as a bare executable path
+# (~/.claude/supervisor/registry.py register ...)
+install -m 755 "$SRC/hooks/registry.py" "$SUPERVISOR_HOME/registry.py"
+
+echo "==> Installing hooks to $HOOK_DIR"
 mkdir -p "$HOOK_DIR"
 install_backup "$SRC/hooks/worker-stopfailure.py" "$HOOK_DIR/worker-stopfailure.py"
+install_backup "$SRC/hooks/session-start-injector.py" "$HOOK_DIR/session-start-injector.py"
+install_backup "$SRC/hooks/shard-guard.py" "$HOOK_DIR/shard-guard.py"
+install_backup "$SRC/hooks/stop-anomaly-capture.py" "$HOOK_DIR/stop-anomaly-capture.py"
 
-echo "==> Registering StopFailure hook in $SETTINGS"
-python3 - "$SETTINGS" "$HOOK_DIR/worker-stopfailure.py" <<'PYEOF'
+echo "==> Registering hooks in $SETTINGS (user-level)"
+python3 - "$SETTINGS" "$HOOK_DIR/worker-stopfailure.py" "$HOOK_DIR/session-start-injector.py" "$HOOK_DIR/shard-guard.py" "$HOOK_DIR/stop-anomaly-capture.py" <<'PYEOF'
 import fcntl
 import json
 import os
@@ -136,8 +184,15 @@ import shutil
 import stat
 import sys
 
-settings, script = sys.argv[1], sys.argv[2]
-command = "python3 %s" % shlex.quote(script)
+settings = sys.argv[1]
+hook_scripts = sys.argv[2:]
+# (event, matcher, script-index) -- None matcher means no matcher field
+HOOK_REGISTRATIONS = [
+    ("StopFailure", None, 0),
+    ("SessionStart", None, 1),
+    ("PreToolUse", "Write|Edit", 2),
+    ("Stop", None, 3),
+]
 
 
 def same_command(a, b):
@@ -175,25 +230,45 @@ try:
               file=sys.stderr)
         sys.exit(1)
 
-    hooks = cfg.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
+    already = {}
+    if "hooks" in cfg and not isinstance(cfg["hooks"], dict):
         print("  ERROR: hooks section of %s is not an object; aborting."
               % settings, file=sys.stderr)
         sys.exit(1)
-    entries = hooks.setdefault("StopFailure", [])
-    if not isinstance(entries, list):
-        print("  ERROR: hooks.StopFailure of %s is not an array; aborting."
-              % settings, file=sys.stderr)
-        sys.exit(1)
-    for group in entries:
-        if not isinstance(group, dict):
-            continue
-        for h in group.get("hooks", []):
-            if isinstance(h, dict) and same_command(h.get("command") or "", command):
-                print("  StopFailure hook already registered; nothing to do")
-                sys.exit(0)
+    for event, matcher, idx in HOOK_REGISTRATIONS:
+        script = hook_scripts[idx]
+        command = "python3 %s" % shlex.quote(script)
+        entries = cfg.setdefault("hooks", {}).setdefault(event, [])
+        if not isinstance(entries, list):
+            print("  ERROR: hooks.%s of %s is not an array; aborting."
+                  % (event, settings), file=sys.stderr)
+            sys.exit(1)
+        found = False
+        for group in entries:
+            if not isinstance(group, dict):
+                continue
+            if matcher is not None and group.get("matcher") != matcher:
+                continue
+            for h in group.get("hooks", []):
+                if isinstance(h, dict) and same_command(
+                        h.get("command") or "", command):
+                    found = True
+                    break
+            if found:
+                break
+        already[(event, matcher)] = (entries, command, found)
 
-    entries.append({"hooks": [{"type": "command", "command": command}]})
+    for (event, matcher), (entries, command, found) in already.items():
+        if found:
+            label = event + (" (matcher %s)" % matcher if matcher else "")
+            print("  %s hook already registered; nothing to do" % label)
+            continue
+        group = {"hooks": [{"type": "command", "command": command}]}
+        if matcher is not None:
+            group["matcher"] = matcher
+        entries.append(group)
+        label = event + (" (matcher %s)" % matcher if matcher else "")
+        print("  registered hooks.%s -> %s" % (label, command))
 
     # atomic replace: unique tmp file, preserve original mode, fsync
     old_mode = None
@@ -212,7 +287,6 @@ try:
     if old_mode is not None:
         os.chmod(tmp, old_mode)
     os.replace(tmp, settings)
-    print("  registered hooks.StopFailure -> %s" % command)
 finally:
     fcntl.flock(lock_fd, fcntl.LOCK_UN)
     os.close(lock_fd)
@@ -230,15 +304,38 @@ echo "  老项目修补/重构（同一姿势，换命令）："
 echo "  终端A（项目目录）:               /rework 修复XX模块的YY问题 [--baseline <git-ref>]"
 echo "  终端B（同一项目目录）:           /worker"
 echo ""
+echo "  调研/探索任务（产出报告不改代码，非 git 目录也可用）："
+echo "  终端A（任意目录）:               /research 调研XX技术选型/事故根因 [--out <报告目录>]"
+echo "  终端B（同一目录）:               /worker"
+echo ""
+echo "  抽象提炼任务（现成材料→高层命题，输入面锁死）："
+echo "  终端A（任意目录）:               /abstract 从这批报告/diff提炼根因与共性 [--out <报告目录>]"
+echo "  终端B（同一目录）:               /worker"
+echo ""
 echo "  （可开更多终端重复 /worker，多 worker 并行受监工）"
 echo ""
-echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查→逐Phase开发(先自CR再受审)→总结报告（绿地）；rework 模式为 考古→安全网→改造规格→计划→逐Phase开发"
-echo "依赖: Claude Code >= 2.1.224（ListAgents + SendMessage；StopFailure hook 需 >= 2.1.259，"
-echo "      官方无检测接口，请自行 claude --version 确认）"
+echo "流程: 监工督促需求澄清→向你对齐→spec审查→plan审查→逐Phase开发(先自CR再受审)→总结报告（绿地）；rework 模式为 考古→安全网→改造规格→计划→逐Phase开发；research 模式为 问题定义→调研方案→逐章调研(证据五级分级+逐问对账)；abstract 模式为 材料盘点→命题草稿→对抗返工(覆盖对账+锚点抽查)"
+echo "多 supervisor 并存（v3）：同一项目可同时跑多个监工（如 /supervisor 开新模块 + /rework 改存量），"
+echo "各用唯一会话名（建议 /rename supervisor-gf / supervisor-rw，含项目后缀更稳）+ 各自分支/worktree 隔离；"
+echo "账本按 session_id 分片互不污染，worker 启动时从 .supervisor/registry.json 自选监工。"
+echo "依赖: Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure/SessionStart/PreToolUse"
+echo "      hooks；官方无检测接口，请自行 claude --version 确认）"
 echo ""
-echo "中断防御（可选）: cron 定时跑 watchdog，worker 失联时投递告警（路径含空格请加引号）："
-echo "  */10 * * * * $MAIL_HOME/supervisor-watchdog '/path/to/repo' 60"
+echo "中断防御（可选）: cron 定时跑 watchdog，worker 失联时投递告警。"
+echo "  正常路径无需手工配置——supervisor 启动协议步骤 7b 会自动注册系统 crontab（含盯"
+echo "  supervisor 自身心跳的第五层防御），收尾时自动移除。手工兜底时务必用与 7b 完全"
+echo "  相同的两行格式（标识行 + 条目行，脚本路径不加引号）——否则 7b 查重 miss 会产生"
+echo "  重复条目、收尾移除也匹配不掉："
+echo "  # supervisor-watchdog /path/to/repo"
+echo "  */10 * * * * ~/.claude/supervisor/supervisor-watchdog '/path/to/repo' 60"
 echo ""
 echo "中断防御（已自动安装）: StopFailure hook——worker 回合因 429/网络/API 错误被掐断时，"
-echo "自动向 supervisor 的 UDS 通道直投 WORKER INTERRUPTED，并落盘 .supervisor/interrupts.jsonl。"
+echo "自动向 supervisor 的 UDS 通道直投 WORKER INTERRUPTED，并落盘 .supervisor/<sid>/interrupts.jsonl"
+echo "（v3 分片路径，<sid> 是该 supervisor 的 session_id；旧平铺布局自动兼容）。"
 echo "仅对被监工项目里已注册（session_id 匹配）的 worker 会话生效，其他会话零干扰。"
+echo "Stop hook（stop-anomaly-capture）——回合看似正常结束但模型层异常时（model:error /"
+echo "空回合 / 尾部退化，判据见 stop-anomaly.md）同样直投+落盘；健康回合零 git spawn、"
+echo "零写入，未受监工会话付一次毫秒级有界尾扫后退出。"
+echo ""
+echo "v3 机械保障（已自动安装）: SessionStart 注入器——每个会话开局自动注入自身 SESSION_ID；"
+echo "PreToolUse 分片守卫——Write|Edit 写错分片或直编 registry.json 时机械拦截并给出正确分片键。"
