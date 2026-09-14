@@ -17,11 +17,11 @@ git clone git@github.com:ljheee/claude-supervisor.git && cd claude-supervisor
 bash install.sh
 
 # 方式二：
-curl -fsSL https://raw.githubusercontent.com/ljheee/claude-supervisor/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ljheee/claude-supervisor/main/install.sh | sh
 ```
 
 
-安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/worker` 五个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py（→ `~/.agent-mail/registry.py`，v3 发现层助手，所有 registry.json 写操作经它）；watchdog 脚本（→ `~/.agent-mail/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言（关键节齐全/无重复标题），断言失败同样中止不留半成品。
+安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/worker` 五个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py（→ `~/.claude/supervisor/registry.py`，v3 发现层助手，所有 registry.json 写操作经它）；watchdog 脚本（→ `~/.claude/supervisor/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言（关键节齐全/无重复标题），断言失败同样中止不留半成品。
 
 版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。
 
@@ -137,14 +137,14 @@ supervisor 活着时每 10 分钟定时自巡检（v2）；但定时 cron 调度
 
 ```bash
 # 手动跑：项目目录 + 超时阈值（分钟，默认 60）
-~/.agent-mail/supervisor-watchdog /path/to/repo 60
+~/.claude/supervisor/supervisor-watchdog /path/to/repo 60
 
 # cron 每 10 分钟巡检一次（正常路径无需手工配：supervisor 启动协议步骤 7b
 # 自动注册/收尾自动移除。手工兜底务必用与 7b 完全相同的两行格式——标识行 +
 # 条目行；否则 7b 查重 miss 产生重复条目、收尾移除也匹配不掉）
 crontab -e
 # supervisor-watchdog /path/to/repo
-# */10 * * * * ~/.agent-mail/supervisor-watchdog '/path/to/repo' 60
+# */10 * * * * ~/.claude/supervisor/supervisor-watchdog '/path/to/repo' 60
 ```
 
 发现逾期 worker 时按分片 supervisor 的 session_id 精确匹配 `~/.claude/sessions/` 后 UDS 直投 WATCHDOG ALERT（含 session_id 与恢复指引）并弹 macOS 通知——多 supervisor 并存时按 sid 路由不会串台（前提：supervisor 会话活着且可达；socket 不可达时该告警丢弃，watchdog 本就是第四层 best-effort）。告警自带梯度去重：静默每加深一个阈值才再告警一次（T、2T、3T…），不会刷屏；无逾期零输出。路径含空格时给 cron 行里的项目目录加引号。
@@ -187,7 +187,7 @@ crontab -e
 ```bash
 rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/research.md ~/.claude/commands/abstract.md ~/.claude/commands/worker.md
 rm -rf ~/.claude/hooks/claude-supervisor
-rm ~/.agent-mail/supervisor-watchdog ~/.agent-mail/registry.py
+rm ~/.claude/supervisor/supervisor-watchdog ~/.claude/supervisor/registry.py
 # 并从 ~/.claude/settings.json 的 hooks.StopFailure / hooks.SessionStart /
 # hooks.PreToolUse / hooks.Stop 数组中删掉对应条目
 ```
@@ -206,7 +206,7 @@ rm ~/.agent-mail/supervisor-watchdog ~/.agent-mail/registry.py
 | `hooks/stop-anomaly-capture.py` | Stop hook（模型层异常捕获：model-error / 空回合 / 尾部退化判据，分级投递，见 stop-anomaly.md；事故 transcript replay 实证零误报） |
 | `hooks/session-start-injector.py` | SessionStart hook（会话身份注入，v3） |
 | `hooks/shard-guard.py` | PreToolUse hook（分片写入守卫，v3） |
-| `hooks/registry.py` | 发现层助手（registry.json 的 fcntl 互斥写，v3，安装到 ~/.agent-mail） |
+| `hooks/registry.py` | 发现层助手（registry.json 的 fcntl 互斥写，v3，安装到 ~/.claude/supervisor/） |
 | `watchdog.sh` | 外部逾期巡检脚本（v3 分片遍历 + UDS 直投） |
 | `test_stopfailure.sh` | hook 回归测试（v3 扩展，83 项断言，含 stop-anomaly-capture case 22-29） |
 | `test_watchdog.sh` | watchdog 回归测试（v3.1 扩展，50 项断言，含 supervisor 自检 Q/R/S/T/U） |

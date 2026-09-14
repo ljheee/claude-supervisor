@@ -227,13 +227,13 @@ supervisor 收到 WORKER INTERRUPTED 后：
 
 ## 6. watchdog 设计细节
 
-`watchdog.sh`（安装为 `~/.agent-mail/supervisor-watchdog`），cron 定时调用。
+`watchdog.sh`（安装为 `~/.claude/supervisor/supervisor-watchdog`），cron 定时调用。
 
 - **失联判定与 4.4 相同**：只认 `last_report_ts` / `last_response_ts` / `registered_at`，忽略 `last_instruction_ts`。
 - **时间解析**：ISO-8601 容错（`fromisoformat` + `Z` 后缀归一 + 两套 fallback 格式），时区偏移会换算到本地再比较；解析失败该 worker 跳过本轮（保守不告警），不做任何输出（P1-11/P2-3 修复）。
 - **告警去重（梯度升级）**：`.supervisor/watchdog_state.json` 记录每 worker 上次告警时的静默分钟数；仅当静默又增长一个完整阈值（T, 2T, 3T...）或条目是新的才再告警。去重状态先原子落盘再发告警——崩溃时最坏丢一条，绝不会有告警风暴（P1-12 修复；空 to_alert 时完全静默）。
 - **macOS 通知**：通知文本经 `osascript` 的 `on run argv` 传参，**永不**拼进 AppleScript 源码——worker 名来自 state.json，是不可信输入（P0-3 修复）。
-- **agent-mail 调用**：参数数组式 subprocess，无 shell 拼接。
+- **外部进程调用（osascript）**：参数数组式 subprocess，无 shell 拼接。
 - **永远 exit 0**：shell 层 `trap 'exit 0' EXIT` + python 层 `2>/dev/null || exit 0`，cron 永远收不到错误输出。
 - **v3.1 supervisor 自检（第五层）**：per-ledger 循环开头（done 跳过后、worker overdue 判定前——零 worker 分片也走得到）读 `.supervisor/registry.json` 本分片 supervisor 的 `heartbeat_ts`：停更超过阈值且会话 socket 不存在 → **DEAD**（osascript 桌面通知引导用户 `claude --resume`）；停更但 socket 仍在 → **DEGRADED**（疑似模型劣化，请求人工介入；通知文本含 kill -9 残留 socket 的兜底指引）。socket 探活遍历全部同 sid 记录、任一活即 alive（与 worker 路由同姿势，防 resume 残留死记录把活 supervisor 误判 DEAD）。通知直投用户而非 supervisor UDS（病人不能给自己叫医生）。去重与 worker 梯度共用分片 `watchdog_state.json`（key `supervisor:<sid>`，basis=心跳 ISO 时间，心跳前移即重置；多分片各自独立去重，case U 实测隔离）。心跳刷新由 supervisor 巡检协议承载（每轮顺带 `registry.py heartbeat`，协议要求 `--project-dir` 必传——漏传会按 CWD 读错 registry、心跳刷不进真文件 → 假 DEAD），watchdog 只读不写 registry。cron 注册/移除由 supervisor 启动协议步骤 7b 与收尾步骤承载（标识注释行 + 条目行成对操作，幂等；先落临时文件再 `crontab "$TMPF"` 装回，防管道中断丢整份 crontab；移除前先查 registry 同项目他人活跃条目——多 supervisor 并存时 A 收尾不拆 B 还在用的 cron）。已知边界：①心跳只在巡检时刷新、cron tick 等当前回合结束才注入——超过阈值的长回合会产生一次假 DEGRADED（梯度去重封顶一次，可忽略）；②kill -9 崩溃残留 socket 文件时真 DEAD 会被分诊为 DEGRADED（兜底指引已引导用户按 DEAD 处理）。
 

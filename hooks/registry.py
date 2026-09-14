@@ -325,7 +325,7 @@ def cmd_list(registry_path):
 
 
 def main():
-    # env override for testing (install path: ~/.agent-mail/registry.py)
+    # env override for testing (install path: ~/.claude/supervisor/registry.py)
     base = os.environ.get("CLAUDE_SUPERVISOR_DIR")
     if base:
         default_registry = os.path.join(base, "registry.json")

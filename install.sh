@@ -15,9 +15,11 @@
 #   /research    - initialize the current session as the research/exploration supervisor
 #   /abstract    - initialize the current session as the abstract/synthesis supervisor
 #   /worker      - register the current session as a supervised worker
-#   registry.py  - v3 discovery-layer helper (installed to ~/.agent-mail, next
-#                  to watchdog; all registry.json writes go through it)
-#   watchdog     - external overdue-worker detector (installed to ~/.agent-mail)
+#   registry.py  - v3 discovery-layer helper (installed to
+#                  ~/.claude/supervisor, next to watchdog; all registry.json
+#                  writes go through it)
+#   watchdog     - external overdue-worker detector (installed to
+#                  ~/.claude/supervisor)
 #   StopFailure  - auto-report interrupted workers (hook, installed to
 #                  ~/.claude/hooks/claude-supervisor/ and registered in settings.json)
 #   Stop         - model-layer anomaly capture (model:error / empty-turn /
@@ -59,7 +61,7 @@ if [ ! -f "$SRC/commands/supervisor.md" ]; then
   SRC="$TMP/claude-supervisor"
 fi
 DEST="$HOME/.claude/commands"
-MAIL_HOME="${AGENT_MAIL_HOME:-$HOME/.agent-mail}"
+SUPERVISOR_HOME="${SUPERVISOR_HOME:-$HOME/.claude/supervisor}"
 HOOK_DIR="$HOME/.claude/hooks/claude-supervisor"
 SETTINGS="$HOME/.claude/settings.json"
 CORE="$SRC/commands/_core-supervisor.md"
@@ -147,24 +149,24 @@ echo "==> Installing core protocol reference copy to $HOOK_DIR/_core-supervisor.
 mkdir -p "$HOOK_DIR"
 install_backup "$CORE" "$HOOK_DIR/_core-supervisor.md"
 
-echo "==> Installing watchdog to $MAIL_HOME/supervisor-watchdog"
-mkdir -p "$MAIL_HOME"
-if [ -f "$MAIL_HOME/supervisor-watchdog" ] && \
-   ! cmp -s "$SRC/watchdog.sh" "$MAIL_HOME/supervisor-watchdog"; then
-  cp "$MAIL_HOME/supervisor-watchdog" "$MAIL_HOME/supervisor-watchdog.bak-${STAMP}"
+echo "==> Installing watchdog to $SUPERVISOR_HOME/supervisor-watchdog"
+mkdir -p "$SUPERVISOR_HOME"
+if [ -f "$SUPERVISOR_HOME/supervisor-watchdog" ] && \
+   ! cmp -s "$SRC/watchdog.sh" "$SUPERVISOR_HOME/supervisor-watchdog"; then
+  cp "$SUPERVISOR_HOME/supervisor-watchdog" "$SUPERVISOR_HOME/supervisor-watchdog.bak-${STAMP}"
   echo "  backed up existing supervisor-watchdog"
 fi
-install -m 755 "$SRC/watchdog.sh" "$MAIL_HOME/supervisor-watchdog"
+install -m 755 "$SRC/watchdog.sh" "$SUPERVISOR_HOME/supervisor-watchdog"
 
-echo "==> Installing registry.py to $MAIL_HOME/registry.py"
-if [ -f "$MAIL_HOME/registry.py" ] && \
-   ! cmp -s "$SRC/hooks/registry.py" "$MAIL_HOME/registry.py"; then
-  cp "$MAIL_HOME/registry.py" "$MAIL_HOME/registry.py.bak-${STAMP}"
+echo "==> Installing registry.py to $SUPERVISOR_HOME/registry.py"
+if [ -f "$SUPERVISOR_HOME/registry.py" ] && \
+   ! cmp -s "$SRC/hooks/registry.py" "$SUPERVISOR_HOME/registry.py"; then
+  cp "$SUPERVISOR_HOME/registry.py" "$SUPERVISOR_HOME/registry.py.bak-${STAMP}"
   echo "  backed up existing registry.py"
 fi
 # 755: core protocol invokes it as a bare executable path
-# (~/.agent-mail/registry.py register ...)
-install -m 755 "$SRC/hooks/registry.py" "$MAIL_HOME/registry.py"
+# (~/.claude/supervisor/registry.py register ...)
+install -m 755 "$SRC/hooks/registry.py" "$SUPERVISOR_HOME/registry.py"
 
 echo "==> Installing hooks to $HOOK_DIR"
 mkdir -p "$HOOK_DIR"
@@ -326,7 +328,7 @@ echo "  supervisor 自身心跳的第五层防御），收尾时自动移除。�
 echo "  相同的两行格式（标识行 + 条目行，脚本路径不加引号）——否则 7b 查重 miss 会产生"
 echo "  重复条目、收尾移除也匹配不掉："
 echo "  # supervisor-watchdog /path/to/repo"
-echo "  */10 * * * * ~/.agent-mail/supervisor-watchdog '/path/to/repo' 60"
+echo "  */10 * * * * ~/.claude/supervisor/supervisor-watchdog '/path/to/repo' 60"
 echo ""
 echo "中断防御（已自动安装）: StopFailure hook——worker 回合因 429/网络/API 错误被掐断时，"
 echo "自动向 supervisor 的 UDS 通道直投 WORKER INTERRUPTED，并落盘 .supervisor/<sid>/interrupts.jsonl"

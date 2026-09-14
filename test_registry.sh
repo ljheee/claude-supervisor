@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Assertion-based regression test for hooks/registry.py (v3 discovery layer).
 # Sandboxed: runs registry.py against a throwaway project dir via the
-# CLAUDE_SUPERVISOR_DIR env override (never touches ~/.agent-mail installs
-# or real projects).
+# CLAUDE_SUPERVISOR_DIR env override (never touches ~/.claude/supervisor
+# installs or real projects).
 set -uo pipefail
 
 SRC="${1:-$(cd "$(dirname "$0")" && pwd)/hooks/registry.py}"

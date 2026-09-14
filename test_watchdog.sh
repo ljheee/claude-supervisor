@@ -3,11 +3,11 @@
 # Sandboxed: fake project state + fake ~/.claude/sessions registry + local
 # UDS servers standing in for the supervisor messaging sockets; never touches
 # real data. (v3: delivery goes over UDS by supervisor session_id, so the old
-# fake agent-mail CLI harness was replaced; the semantic assertions of every
+# fake CLI harness was replaced; the semantic assertions of every
 # legacy case are preserved verbatim.)
 set -uo pipefail
 
-WD_SRC="${1:-$HOME/.agent-mail/supervisor-watchdog}"
+WD_SRC="${1:-$HOME/.claude/supervisor/supervisor-watchdog}"
 FAILURES=0
 TMP=""
 SERVER_PIDS=""

@@ -12,7 +12,7 @@ storage layer with the Write/Edit tools:
      fix-it channel);
   2. writing .supervisor/registry.json directly: ALWAYS denied - it is the
      single multi-writer core file; every legal write goes through
-     ~/.agent-mail/registry.py (which the model invokes via Bash).
+     ~/.claude/supervisor/registry.py (which the model invokes via Bash).
 
 Everything else is allowed, including archive/ dirs and the legacy flat
 state.json (they simply don't match the .supervisor/<uuid>/ pattern).
@@ -82,7 +82,7 @@ def main():
     # rule 2: registry.json direct write -> always denied
     if head.lower() == "registry.json":
         deny(".supervisor/registry.json 是多写者核心文件（fcntl 并发锁在"
-             " ~/.agent-mail/registry.py 内）——Write/Edit 直编会击穿并发安全。"
+             " ~/.claude/supervisor/registry.py 内）——Write/Edit 直编会击穿并发安全。"
              "合法写操作一律经 registry.py 子命令（Bash 调用）。")
 
     # rule 1: shard write -> path uuid must equal this session's session_id

@@ -53,7 +53,7 @@
 # ladder resets and the next silence episode alerts from scratch.
 #
 # Usage:   supervisor-watchdog <project-dir> [threshold_minutes]   (default 60)
-# Cron:    */10 * * * * ~/.agent-mail/supervisor-watchdog '/path/to/repo' 60
+# Cron:    */10 * * * * ~/.claude/supervisor/supervisor-watchdog '/path/to/repo' 60
 set -uo pipefail
 
 PROJECT_DIR="${1:-}"
