@@ -9,8 +9,15 @@
 ## 安装
 
 ```bash
+# 方式一：已有仓库 checkout
+git clone <本仓库地址> && cd claude-supervisor
 bash install.sh
+
+# 方式二：不 clone，一键安装（脚本检测到不在仓库内时会自行浅克隆到临时目录再安装）
+curl -fsSL https://raw.githubusercontent.com/xxxx/install.sh | sh
 ```
+
+> URL 里的 `xxxx` 是占位符，替换为真实 `<org>/<repo>` 路径；curl 直装方式也可传仓库地址覆盖：`curl -fsSL .../install.sh | sh -s -- https://github.com/<org>/<repo>.git`。`curl | sh` 会在你机器上直接执行脚本，请确认来源可信（本脚本安装范围仅限 `~/.claude` 与 `~/.agent-mail`，已有文件先备份再覆盖）。
 
 安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/worker` 五个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py（→ `~/.agent-mail/registry.py`，v3 发现层助手，所有 registry.json 写操作经它）；watchdog 脚本（→ `~/.agent-mail/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言（关键节齐全/无重复标题），断言失败同样中止不留半成品。
 
@@ -74,11 +81,11 @@ research 模式的前置阶段是「问题定义 → 调研方案」：先把模
 ```bash
 # 终端A：材料所在目录（非 git 也行——输入常是文档目录/学城链接）
 claude
-:> /abstract 从这批报告提炼当前系统的根因问题 / 从最近 30 个 commit 提炼共性 [--out <报告目录>]
+> /abstract 从这批报告提炼当前系统的根因问题 / 从最近 30 个 commit 提炼共性 [--out <报告目录>]
 
 # 终端B：同一目录
 claude
-:> /worker
+> /worker
 ```
 
 abstract 与 research 方向相反：research 是发散（从问题去世界找证据），abstract 是收敛（从材料找支配结构）——**证据在材料内，输入面锁死**（ingest 定稿后不得引入新材料，含联网/查库）。前置阶段是「材料盘点 → 命题草稿」：先把材料盘成可对账的清单（粒度约定：文档逐篇/commit 逐个/散 diff 逐 hunk 群）并逐件压缩+锚点，再审命题草稿。执行期三道硬纪律：**两件套验收**（覆盖对账——每件材料要么被命题解释要么显式反例；回指锚点——`材料内模式`命题锚点必填，`意图/归因推断`命题显式标注推断性质+推导链，防揣测当事实）、**锚点抽查**（监工亲自打开锚点核对命题与材料相符，系统性造假整轮重提炼）、**空话检查+缺席信号**（不可证伪的正确废话降级为观察；材料里反复缺席的东西必须进清单——只看“有什么”提炼不出“没什么”）。监工还对抗**叙事强制**：一个叙事解释所有材料往往是最可疑的那个。每轮 refine 产出即上报、监工逐轮对抗审查，非逐章生产。报告默认 `docs/abstract/<日期-主题>/`。
@@ -93,6 +100,8 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
   → done（supervisor 出项目总结：做了什么、质量结论、遗留风险）
 ```
 
+（这是绿地的默认骨架；rework/research/abstract 模式会覆盖前置阶段与执行阶段枚举，见上文各模式章节。）
+
 ## worker 中断了会发生什么
 
 | 中断类型 | 表现 |
@@ -103,11 +112,11 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 
 中断流水落盘 `.supervisor/<sid>/interrupts.jsonl`（v3 分片路径，`<sid>` 是该 supervisor 的 session_id；旧平铺布局自动兼容），supervisor 处理后在同目录 `acknowledged.jsonl` 记账；两者差集 = 未处理中断，每次被唤醒自动补课（即使当时 supervisor 不在线也不会漏）。每 Phase 立即 commit 的纪律保证任何中断最多丢当前 Phase 未提交部分。
 
-前提：项目 `.gitignore` 加 `.supervisor/`（supervisor 启动时也会提醒）。
+前提：项目 `.gitignore` 加 `.supervisor/`（supervisor 启动时会主动询问是否代为追加，用户点头即做——不会只提醒不跟进）。
 
 ## 定时自巡检（v2）
 
-supervisor 启动时用 `CronCreate` 创建每 10 分钟的 session-only 巡检任务（不传 durable——durable 任务是目录级共享的，执行者死后会被同目录其他会话接管执行，巡检必须只属于 supervisor 自己）。每次 tick：CronList 自查（任务因自动过期消失则立即重建）→ 执行巡检三步（失联判定 / pending_check 结算 / 中断补课）→ 无事时只输出一行"巡检正常，无待办"（noop 纪律，防上下文膨胀加速协议淡化）。全部 worker 完成时 CronDelete 收尾。即使 cron 过期/失效，supervisor 被任何消息/用户输入唤醒时仍顺带执行同样的巡检（双保险）。机制实测依据见 `specs/2026-09-05-scheduled-supervision/claude_cron.md`。
+supervisor 启动时用 `CronCreate` 创建每 10 分钟的 session-only 巡检任务（不传 durable——durable 任务是目录级共享的，执行者死后会被同目录其他会话接管执行，巡检必须只属于 supervisor 自己）。每次 tick：CronList 自查（任务因自动过期消失则立即重建）→ 执行巡检三步（失联判定 / pending_check 结算 / 中断补课）→ worker 在场性检查（本方零 worker 且注册超 15 分钟 → 提醒用户去 worker 终端重试注册，防「worker 先查后注册 vs supervisor 晚注册」的互等死锁）→ 无事时只输出一行"巡检正常，无待办"（noop 纪律，防上下文膨胀加速协议淡化）。全部 worker 完成时 CronDelete 收尾。即使 cron 过期/失效，supervisor 被任何消息/用户输入唤醒时仍顺带执行同样的巡检（双保险）。机制实测依据见 `specs/2026-09-05-scheduled-supervision/claude_cron.md`。
 
 另：worker 空闲时宿主的 notify_when_idle 通知会刷新其活性时钟（idle ≠ 完成，不作督促触发器——worker 协议本就是不干完里程碑不上报）。
 
@@ -169,7 +178,7 @@ rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/comma
 rm -rf ~/.claude/hooks/claude-supervisor
 rm ~/.agent-mail/supervisor-watchdog ~/.agent-mail/registry.py
 # 并从 ~/.claude/settings.json 的 hooks.StopFailure / hooks.SessionStart /
-# hooks.PreToolUse 数组中删掉对应条目
+# hooks.PreToolUse / hooks.Stop 数组中删掉对应条目
 ```
 
 ## 文件清单

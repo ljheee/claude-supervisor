@@ -4,6 +4,12 @@
 # PreToolUse hooks used by v3 -- no official API to detect this, verify
 # with `claude --version`).
 #
+# Remote install (no clone needed):
+#   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/install.sh | sh
+# (the script detects it is running without a repo checkout and shallow-clones
+#  the repo into a temp dir; override the URL via the first argument or
+#  SUPERVISOR_REPO_URL)
+#
 #   /supervisor  - initialize the current session as the greenfield-mode supervisor
 #   /rework      - initialize the current session as the rework/refactor supervisor
 #   /research    - initialize the current session as the research/exploration supervisor
@@ -37,7 +43,21 @@
 #   - spliced commands failing structural assertions ABORT the install
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")" && pwd)"
+# Remote install support: `curl -fsSL <raw-install.sh-url> | sh` runs this
+# script WITHOUT a repo checkout next to it ($0 is the shell itself). Detect
+# the missing checkout and shallow-clone the repo into a temp dir first.
+#   - repo URL can be overridden: `... | sh -s -- <repo-url>` or
+#     SUPERVISOR_REPO_URL=<url> sh (default placeholder below must be replaced
+#     with the real <org>/<repo> when published)
+SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
+if [ ! -f "$SRC/commands/supervisor.md" ]; then
+  REPO_URL="${1:-${SUPERVISOR_REPO_URL:-https://github.com/xxxx/claude-supervisor.git}}"
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  echo "==> No repo checkout found next to the script; cloning $REPO_URL"
+  git clone --depth 1 "$REPO_URL" "$TMP/claude-supervisor" 1>&2
+  SRC="$TMP/claude-supervisor"
+fi
 DEST="$HOME/.claude/commands"
 MAIL_HOME="${AGENT_MAIL_HOME:-$HOME/.agent-mail}"
 HOOK_DIR="$HOME/.claude/hooks/claude-supervisor"
