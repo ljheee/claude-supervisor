@@ -18,7 +18,7 @@
 
 中断检测做成了 hook，不是 prompt。StopFailure 和 Stop 是 Claude Code 的事件回调，worker 的回合被 429 或网络错误掐断时，hook 直接通过 Unix socket 把 WORKER INTERRUPTED 投递给监工，同时在项目的 .supervisor/ 里落一份 interrupts.jsonl。报丧这件事不再依赖死者本人。
 
-盯梢的人不能是同伙。watchdog 是个两百多行的 shell 脚本，注册在系统 crontab 里每 10 分钟跑一次。它只认两个硬信号：worker 最后一次主动汇报的时间戳，监工在 registry 里的心跳。静默超时就用 osascript 弹桌面通知，直接找用户。监工劣化时它的 cron 也是哑的，所以这个检查者必须在进程外。
+盯梢的人不能是同伙。watchdog 是个四百多行的 shell 脚本，注册在系统 crontab 里每 10 分钟跑一次。它只认两个硬信号：worker 最后一次主动汇报的时间戳，监工在 registry 里的心跳。静默超时就用 osascript 弹桌面通知，直接找用户。监工劣化时它的 cron 也是哑的，所以这个检查者必须在进程外。
 
 进度不放在对话里。所有状态落盘在 .supervisor/ 下，按监工的 session_id 分成互不干扰的片。worker 中断后恢复，先对齐账本再继续；监工失忆，resume 回来同样靠账本接上。分片还有一个附带好处：多个监工在同一项目里并存，谁也写不脏谁的账。
 
