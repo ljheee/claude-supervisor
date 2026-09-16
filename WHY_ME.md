@@ -8,7 +8,7 @@ This toolkit takes you off the night shift. One supervisor session manages N wor
 
 ## What Lets You Walk Away
 
-**Rate-limit self-healing, no more typing "continue".** Run multiple workers in parallel and collectively hitting 429 is the norm, not the exception. The instant a worker gets cut off, a StopFailure/Stop hook (an event callback, not a prompt instruction) reports the interruption straight to the supervisor. The supervisor logs it, backs off for five minutes, wakes workers one by one in a stagger (each extra worker gets one more minute of delay), and resumes from the interruption point. You never need to show up.
+**Rate-limit self-healing, no more typing "continue".** Running multiple workers in parallel and collectively hitting 429 is the norm, not the exception. The instant a worker gets cut off, a StopFailure/Stop hook (an event callback, not a prompt instruction) reports the interruption straight to the supervisor. The supervisor logs it, backs off for five minutes, wakes workers one by one in a stagger (each extra worker gets one more minute of delay), and resumes from the interruption point. You never need to show up.
 
 **Automatic phase-to-phase flow.** When a worker finishes a phase, it self-reviews first, then submits to the supervisor's adversarial review. Approved — the supervisor automatically issues the full instructions for the next phase. Rejected — it goes back with an issue list and gets redone. The pipeline moves by itself; you only get escalated to when it gets stuck.
 
@@ -16,13 +16,13 @@ This toolkit takes you off the night shift. One supervisor session manages N wor
 
 **Crashes resume, never restart.** All progress is persisted in sharded ledgers under `.supervisor/`. A worker crashes — open a new session, realign with the ledger, carry on. The supervisor itself crashes — resume, and it picks up the same way. "Months of work gone overnight" is not an outcome this design allows.
 
-## Four Modes, One Class of Blocked Pain Each
+## Four Modes, Each Blocking One Class of Trouble
 
 Greenfield projects (`/supervisor`): the biggest risk of AI building from scratch is it misunderstanding the goal without you noticing — by the time you see the finished product, it's too late. The supervisor interrogates the goal into a spec and plan for your confirmation upfront, then reviews phase by phase; drift gets rejected on the spot. The supervisor acts as a course-corrector against the project goal. Your involvement shrinks to twenty minutes at the start plus a final acceptance.
 
 Legacy rework (`/rework`): the scariest thing about AI touching old code is "convenience" — the casual refactor, the test tweaked green, the thing you explicitly froze, touched anyway. The supervisor first excavates the baseline, sets up a regression safety net, freezes a don't-touch list, and after every phase double-checks scope with git; any boundary crossing gets sent back.
 
-Research (`/research`): the biggest pit of AI research is confident hallucination. Evidence gets graded on five levels, the supervisor personally spot-checks and reproduces key evidence, and one fabrication re-opens the whole chapter. In the report you receive, every claim traces back to a source.
+Research (`/research`): the biggest pitfall of AI doing research is confident hallucination. Evidence gets graded on five levels, the supervisor personally spot-checks and reproduces key evidence, and one fabrication re-opens the whole chapter. In the report you receive, every claim traces back to a source.
 
 Synthesis (`/abstract`): hand it a pile of material to summarize, and it either gives you "correct-sounding platitudes" or quietly pulls in extra material as it writes. The material inventory locks once finalized; coverage reconciliation guarantees every item is either explained by a proposition or explicitly marked as a counterexample; propositions that can't be falsified and have no use get demoted.
 
