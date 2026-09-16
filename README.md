@@ -31,10 +31,9 @@ curl -fsSL https://raw.githubusercontent.com/ljheee/claude-supervisor/main/insta
 # 或 SUPERVISOR_REPO_URL=<url> sh ./install.sh
 ```
 
+安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/worker` 五个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py 与 watchdog（→ `~/.claude/supervisor/`，registry.json 写操作全经前者）。已有同名文件先备份再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言，失败同样中止不留半成品。
 
-安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/worker` 五个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py（→ `~/.claude/supervisor/registry.py`，v3 发现层助手，所有 registry.json 写操作经它）；watchdog 脚本（→ `~/.claude/supervisor/supervisor-watchdog`）。已有同名文件会先备份（`.bak-<时间戳>`）再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言（关键节齐全/无重复标题），断言失败同样中止不留半成品。
-
-版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。
+版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。桌面通知用 osascript，目前仅支持 macOS（其余功能全平台可用）。
 
 ## 快速开始（多终端）
 
@@ -134,33 +133,19 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 
 中断流水落盘 `.supervisor/<sid>/interrupts.jsonl`（v3 分片路径，`<sid>` 是该 supervisor 的 session_id；旧平铺布局自动兼容），supervisor 处理后在同目录 `acknowledged.jsonl` 记账；两者差集 = 未处理中断，每次被唤醒自动补课（即使当时 supervisor 不在线也不会漏）。每 Phase 立即 commit 的纪律保证任何中断最多丢当前 Phase 未提交部分。
 
+## 它怎么保活
+
+没人盯着会不会出事？三道保活机制，全部不需要你配置：
+
+1. **监工自己每 10 分钟巡检一次**（session-only cron，启动时自动创建、收尾自动清理；任务自动过期消失则立即重建，被任何消息唤醒时也顺带巡检——双保险）。巡检内容：失联判定、中断补课、worker 在场性检查（防「worker 先查后注册 vs supervisor 晚注册」的互等死锁）。
+2. **watchdog 在系统 crontab 里盯所有人**（启动协议自动注册、收尾自动移除）：worker 静默超时，告警直投监工；监工自己心跳停更，弹桌面通知找你（附 `claude --resume` 恢复指引）——检查者独立于被检查者的会话，监工死了它照样响。告警带梯度去重，不刷屏。
+3. **账本全落盘**：状态、中断流水、确认记录都在 `.supervisor/` 下，会话崩溃不丢账，恢复后对齐接着干。
+
+已知边界：监工陷在超过阈值的超长回合（如自己跑全量测试）时，watchdog 会产生一次假 DEGRADED（去重保证只此一次，可忽略）。机制细节见 DESIGN.md。
+
 前提：项目 `.gitignore` 加 `.supervisor/`（supervisor 启动时会主动询问是否代为追加，用户点头即做——不会只提醒不跟进）。
 
-## 定时自巡检（v2）
-
-supervisor 启动时用 `CronCreate` 创建每 10 分钟的 session-only 巡检任务（不传 durable——durable 任务是目录级共享的，执行者死后会被同目录其他会话接管执行，巡检必须只属于 supervisor 自己）。每次 tick：CronList 自查（任务因自动过期消失则立即重建）→ 执行巡检三步（失联判定 / pending_check 结算 / 中断补课）→ worker 在场性检查（本方零 worker 且注册超 15 分钟 → 提醒用户去 worker 终端重试注册，防「worker 先查后注册 vs supervisor 晚注册」的互等死锁）→ 无事时只输出一行"巡检正常，无待办"（noop 纪律，防上下文膨胀加速协议淡化）。全部 worker 完成时 CronDelete 收尾。即使 cron 过期/失效，supervisor 被任何消息/用户输入唤醒时仍顺带执行同样的巡检（双保险）。机制实测依据见 `specs/2026-09-05-scheduled-supervision/claude_cron.md`。
-
 另：worker 空闲时宿主的 notify_when_idle 通知会刷新其活性时钟（idle ≠ 完成，不作督促触发器——worker 协议本就是不干完里程碑不上报）。
-
-## watchdog（可选，推荐）
-
-supervisor 活着时每 10 分钟定时自巡检（v2）；但定时 cron 调度器寄生在 supervisor 宿主进程里，supervisor 死则巡检死。cron watchdog 补上「supervisor 进程死亡无人巡检」的盲区（v3.1 起还补上「supervisor 自身劣化/死亡无人发现」的盲区，见下）：
-
-```bash
-# 手动跑：项目目录 + 超时阈值（分钟，默认 60）
-~/.claude/supervisor/supervisor-watchdog /path/to/repo 60
-
-# cron 每 10 分钟巡检一次（正常路径无需手工配：supervisor 启动协议步骤 7b
-# 自动注册/收尾自动移除。手工兜底务必用与 7b 完全相同的两行格式——标识行 +
-# 条目行；否则 7b 查重 miss 产生重复条目、收尾移除也匹配不掉）
-crontab -e
-# supervisor-watchdog /path/to/repo
-# */10 * * * * ~/.claude/supervisor/supervisor-watchdog '/path/to/repo' 60
-```
-
-发现逾期 worker 时按分片 supervisor 的 session_id 精确匹配 `~/.claude/sessions/` 后 UDS 直投 WATCHDOG ALERT（含 session_id 与恢复指引）并弹 macOS 通知——多 supervisor 并存时按 sid 路由不会串台（前提：supervisor 会话活着且可达；socket 不可达时该告警丢弃，watchdog 本就是第四层 best-effort）。告警自带梯度去重：静默每加深一个阈值才再告警一次（T、2T、3T…），不会刷屏；无逾期零输出。路径含空格时给 cron 行里的项目目录加引号。
-
-**v3.1 supervisor 自检（第五层，盯 supervisor 本体）**：同一脚本以 `.supervisor/registry.json` 心跳判 supervisor 活性——心跳停更（心跳由 supervisor 每轮巡检顺带 `registry.py heartbeat` 刷新，停更即巡检链已死）且会话 socket 不存在 → **DEAD**，通知文本引导用户 `claude --resume <sid>` 唤醒；心跳停更但 socket 仍在 → **DEGRADED**（疑似模型劣化，同 09-07 事故形态），通知用户人工介入。通知直投用户（osascript 桌面通知）而非 supervisor——病人不能给自己叫医生。自检在零 worker 分片上同样生效，去重与 worker 梯度共用 `watchdog_state.json`（key `supervisor:<sid>`，心跳前移即梯度重置）。零 worker 也可检：自检在 worker overdue 判定之前，不受「零 worker 时跳过循环尾部」影响。已知边界：心跳只在巡检时刷新、巡检 cron tick 要等当前回合结束才注入——supervisor 陷在一个超过阈值的**长回合**（深度 CR、自己跑全量测试）时会产生一次假 DEGRADED（梯度去重保证只此一次、不刷屏），可忽略。
 
 ## 命令
 
@@ -191,6 +176,7 @@ crontab -e
 - **supervisor 行为漂移**（长会话被压缩后协议淡化）：重新执行对应模式的命令（`/supervisor`、`/rework`、`/research`、`/abstract`）重注入协议，state.json 会恢复全部上下文。
 - **监工不是 100% 可靠（已知边界）**：监工人格来自 prompt 注入，遵循度无法确保。本套件的对冲：中断检测的触发（hook/watchdog）是硬代码不依赖监工自觉；进度全在 state.json 里，漂移可重注入恢复；软失效（漏巡检等）的后果被硬兜底层限制为"晚发现"而非"不发现"。详见 DESIGN.md 第 9 节。
 - **怀疑 hook 没生效**：跑 `bash test_stopfailure.sh`、`bash test_watchdog.sh` 和 `bash test_registry.sh` 回归（断言型沙箱测试，不碰真实数据）；真实中断后查 `.supervisor/<sid>/interrupts.jsonl`（`<sid>` 是该 supervisor 的 session_id；旧平铺布局在 `.supervisor/interrupts.jsonl`）有无新条目。
+- **想手动跑一次 watchdog**：`~/.claude/supervisor/supervisor-watchdog /path/to/repo 60`（项目目录 + 超时阈值分钟，默认 60）。
 - **想跨 Codex 用**：本套件的消息通道是 Claude↔Claude 官方机制；Codex worker 可改用 agent-mail 桥上报（两套件互补）。
 
 ## 卸载
@@ -203,29 +189,6 @@ rm -rf ~/.claude/supervisor
 # hooks.PreToolUse / hooks.Stop 数组中删掉对应条目
 ```
 
-## 文件清单
+## 仓库结构
 
-| 文件 | 用途 |
-|---|---|
-| `commands/_core-supervisor.md` | 核心协议片段（拼接原料，不单独安装） |
-| `commands/supervisor.md` | /supervisor 绿地模式层（安装期与 core 拼接） |
-| `commands/rework.md` | /rework 重构模式层（安装期与 core 拼接） |
-| `commands/research.md` | /research 调研模式层（安装期与 core 拼接） |
-| `commands/abstract.md` | /abstract 抽象提炼模式层（安装期与 core 拼接） |
-| `commands/worker.md` | /worker 命令（工人协议，v3 含 registry 发现/自报 sid） |
-| `hooks/worker-stopfailure.py` | StopFailure hook（中断自动上报，v3 多分片解析） |
-| `hooks/stop-anomaly-capture.py` | Stop hook（模型层异常捕获：model-error / 空回合 / 尾部退化判据，分级投递，见 stop-anomaly.md；事故 transcript replay 实证零误报） |
-| `hooks/session-start-injector.py` | SessionStart hook（会话身份注入，v3） |
-| `hooks/shard-guard.py` | PreToolUse hook（分片写入守卫，v3） |
-| `hooks/registry.py` | 发现层助手（registry.json 的 fcntl 互斥写，v3，安装到 ~/.claude/supervisor/） |
-| `watchdog.sh` | 外部逾期巡检脚本（v3 分片遍历 + UDS 直投） |
-| `test_stopfailure.sh` | hook 回归测试（v3 扩展，83 项断言，含 stop-anomaly-capture case 22-29） |
-| `test_watchdog.sh` | watchdog 回归测试（v3.1 扩展，50 项断言，含 supervisor 自检 Q/R/S/T/U） |
-| `test_registry.sh` | registry.py 回归测试（v3，29 项断言） |
-| `specs/2026-09-05-rework-mode/` | rework 模式 spec/plan |
-| `specs/2026-09-05-scheduled-supervision/` | v2 spec/plan + 定时任务机制实测记录（claude_cron.md） |
-| `specs/2026-09-06-multi-supervisor/` | v3 spec/plan（多 supervisor 并存） |
-| `specs/2026-09-09-research-mode/` | research 模式 spec/plan（含双路 CR 记录） |
-| `specs/2026-09-10-abstract-mode/` | abstract 模式 spec/plan（含 CR 记录） |
-| `install.sh` | 安装 |
-| `DESIGN.md` | 设计原理 |
+核心协议 `commands/_core-supervisor.md` + 四个模式层（`commands/*.md`）+ 工人协议 `commands/worker.md`，安装期由 `install.sh` 拼接分发；四个 hook 与 `registry.py` 在 `hooks/`；watchdog 是根目录的 `watchdog.sh`；三个回归测试 `test_*.sh`；每轮迭代的 spec/plan 存档在 `specs/`（含设计决策与 CR 记录）；技术设计原理见 [DESIGN.md](DESIGN.md)。
