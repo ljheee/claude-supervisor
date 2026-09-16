@@ -1,5 +1,7 @@
 # claude-supervisor
 
+中文（本文件） | [English](README.md)
+
 用 Claude Code 干正事，最贵的不是 token，是你守在键盘前的时间：worker 停了要敲"继续"，限流了要等完了再催，干完一段要亲自检查才敢放行下一段。这套东西把夜班撤了——一个 Supervisor 会话管 N 个 Worker 会话，你写好目标、答完开局的需求澄清，就可以走开，只在需要拍板时收到通知。
 
 凭什么能让你走得开：

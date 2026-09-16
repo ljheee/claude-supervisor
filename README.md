@@ -1,5 +1,7 @@
 # claude-supervisor
 
+[中文文档](README-zh.md) | English (this file)
+
 When doing real work with Claude Code, the most expensive thing isn't tokens — it's your time at the keyboard: workers stall and need you to type "continue", rate limits hit and you wait them out, and every finished chunk needs your personal review before the next one starts. This toolkit removes the night shift: one Supervisor session manages N Worker sessions. You write the goal, answer the upfront requirement questions, and walk away — you only get notified when a decision needs your call.
 
 What lets you walk away:
