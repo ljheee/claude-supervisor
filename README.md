@@ -104,7 +104,7 @@ A pile of existing material (a few reports/articles, a dozen scattered code chan
 
 ```bash
 # Terminal A: the directory holding the material (non-git works — input
-# is often a documents directory / wiki links)
+# is often a documents directory / links to documents)
 claude
 > /abstract distill the system's root problems from this batch of reports / extract commonality from the last 30 commits [--out <report-dir>]
 
