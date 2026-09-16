@@ -15,7 +15,7 @@ argument-hint: <提炼目标与材料来源> [--project-dir DIR] [--out <报告�
 - registry 注册时 `--mode abstract`。
 - `--out <报告目录>`：报告的落盘目录。显式传参时启动即校验（父链存在或可 `mkdir -p` 创建，不可写 ESCALATE）；**缺省时启动只校验 `<project-dir>/docs/abstract/` 可创建**——完整路径的 `<日期-主题>` 主题词要 distill 定题后才确定，由你在 distill APPROVE 后定题回填完整路径，并在首个 refine 指令中显式下发给 worker（worker 不自己猜落盘位置）。
 - **worker-facing 约束统一下发**（worker 只读 worker.md，读不到本模式层——与 rework 下发 frozen 清单同构的机制）：初始指令除 core 必含项外，必须完整下发五项：①`--out` 落点纪律（显式路径即最终路径；缺省则明确「最终路径 distill 定题后由首个 refine 指令下发」）与「报告产物只落此处或系统临时目录」；②产品代码只读红线与免责通道；③命题格式（两类标注：`材料内模式`——锚点必填；`意图/归因推断`——显式标注推断性质+支撑锚点推导链）与「每轮上报必附命题+锚点+覆盖矩阵+置信度」；④非 git 目录跳过 commit 的覆盖声明（git 仓库内 trailer 照 `worker: <你的名>, phase: refine-N`——worker 署名不可省，防从 git log 抄旧模板/无名 commit；若 worker 中途 `/rename` 改名，完成改名+registry upsert 后再做首个 refine commit，消除 trailer 署新名但消息路由仍旧名的窗口）；⑤单轮时间盒 90 分钟与**超时中间上报义务**（超时必须上报中间命题+缺口清单——显式覆盖 worker「不干完里程碑不上报」的默认纪律）。
-- 非 git 目录**允许**（输入常是文档目录/学城链接，调研不硬依赖 git——与 rework 的 git 断言相反的显式差异）：在 git 仓库内则报告照 commit 纪律；非 git 目录跳过 commit，落盘即交付，**中断对齐锚改用 `--out` 最新落盘产物**（文件清单+mtime）——resume 唤醒后先对齐最新落盘再续提炼，替代 git 锚。
+- 非 git 目录**允许**（输入常是文档目录，调研不硬依赖 git——与 rework 的 git 断言相反的显式差异）：在 git 仓库内则报告照 commit 纪律；非 git 目录跳过 commit，落盘即交付，**中断对齐锚改用 `--out` 最新落盘产物**（文件清单+mtime）——resume 唤醒后先对齐最新落盘再续提炼，替代 git 锚。
 - 长阶段时限：distill 与单轮 refine 的失联判定时限默认 120 分钟（下发指令时与 worker 显式约定）。
 
 ## 前置阶段（abstract）
