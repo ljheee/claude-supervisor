@@ -11,7 +11,7 @@
 |---|---|---|
 | commands/adversarial.md | 新建（模式层） | ~95 |
 | install.sh | 修改 4 处 | +5/-1 |
-| README.md / README-zh.md | 修改 4+2 处（双语） | ~25 行/语言 |
+| README.md / README-zh.md | 修改 4+2 处（双语）+ 模式专章一节 | ~35 行/语言 |
 | specs/2026-09-17-adversarial-review-mode/ | 不动（本 plan 落此目录） | — |
 
 零改动文件：commands/worker.md、commands/_core-supervisor.md、hooks/*（registry.py 收任意 mode 字符串）、watchdog.sh、test_*.sh。
@@ -32,11 +32,12 @@ argument-hint: <被审对象与审查目标> [--project-dir DIR] [--out <报告�
 六条，对应 spec §3：
 
 1. 模式定位（输入=PR diff/方案文档/调研报告等已有产出，输出=收敛审查报告，非代码改动）。执行阶段语义覆盖 core 的 dev-N 骨架（无 total_phases，覆盖即完整裁定）——**phase 归属声明**：supervisor 侧 `ingest|assign|merge` 不占 workers[].phase，worker 侧 `round1 → cross-1 →（必要时）cross-2 → done` per-worker 流转。
-2. **core 启动步骤 8 的模式层覆盖**：收到 WORKER REGISTER 照常登记（校验+写 workers[]），初始指令暂缓——assign 定稿后按视角分配表补发。此条必须显式写明（spec P2 修订，防无视角指令先发出去）。
+2. **core 启动步骤 8 的模式层覆盖**：收到 WORKER REGISTER 照常登记（校验+写 workers[]），初始指令暂缓——assign 定稿后按视角分配表补发，**补发时 worker 的 phase 直接置 `round1`**（不走 core 默认的 dev-1/前置首阶段语义；上报 Phase 字段填 round1/cross-1 实际值，同 abstract 对 WORKER REPORT 模板 Phase 字段的覆盖方式）。此条必须显式写明（防无视角指令先发出去）。
 3. registry 注册 `--mode adversarial`。
 4. `--out` 落点纪律（同 abstract 第 16 行）：显式传参启动即校验父链，缺省启动只校验 `docs/adversarial/` 可创建，完整路径 assign 定题后随初始指令下发。
-5. **worker-facing 四项统一下发**（worker 读不到模式层）：①视角 scope（审查清单+排除项）；②round1 纪律（findings 只在消息体内上报、每条含观点+锚点+置信+证伪判据）；③cross 纪律（匿名并集逐条三态回应、允许新增、不得揣测对手身份）；④时限约定（大 PR 建议 120 分钟，覆盖 core 默认 60 分钟）与超时中间上报义务。
-6. 两个汇合点声明（core「该 phase 明确需要汇合」例外条款的适用者）：① round1 全员收齐→监工建匿名并集→统一下发 cross-1；② cross-1 回应全员收齐→判争议，有未收敛争议项才发 cross-2。
+5. **worker-facing 五项统一下发**（worker 读不到模式层，对齐 abstract 五项下发清单）：①视角 scope（审查清单+排除项）；②round1 纪律（findings 只在消息体内上报、每条含观点+锚点+置信+证伪判据）；③cross 纪律（匿名并集逐条三态回应、允许新增、不得揣测对手身份）；④时限约定（大 PR 建议 120 分钟，覆盖 core 默认 60 分钟）与超时中间上报义务；⑤**审查零 commit 纪律**（审查是只读任务，被审仓库内 worker 零 commit、零落盘——与 abstract 相反的显式差异；报告由监工在 merge 后统一落盘 --out，worker 不碰 git，自然无 trailer/rename 窗口问题）。
+6. **中断对齐锚**（round1 产出在消息体不落盘，worker 崩溃恢复需替代锚）：初始指令下发时与 worker 显式约定——崩在 round1 中间，resume 唤醒后以**监工分片已登记的 findings 清单**为断点（监工下发 cross-1 时把该 worker 已收到的 findings 原样回显），重干未上报部分、不重干已登记部分；监工崩了同样以分片重建状态。worker 无法自查分片，断点真值在监工侧。
+7. 两个汇合点声明（core「该 phase 明确需要汇合」例外条款的适用者）：① round1 全员收齐→监工建匿名并集→统一下发 cross-1；② cross-1 回应全员收齐→判争议，有未收敛争议项才发 cross-2。
 
 ### 1.3 前置阶段节（## 前置阶段（adversarial））
 
@@ -79,7 +80,7 @@ argument-hint: <被审对象与审查目标> [--project-dir DIR] [--out <报告�
 3. FAQ 决策树（:184 / zh:174+）：加「审已有产出（PR/方案/调研报告）→ /adversarial」分支。
 4. 文件清单（Repository Layout :203+ / zh:194+）：four mode layers → five mode layers。
 5. 英文版 Uninstall（:192+）：命令清单加 `adversarial.md`；中文版对应节同步。
-6. 模式专章：README 现有四模式各有专章（rework/research/abstract 各一节）——adversarial 加一节（两轮结构一段+用法示例代码块+worker 数决策表精简版），双语。
+6. 模式专章：README 现有四模式各有专章（rework/research/abstract 各一节）——adversarial 加一节（两轮结构一段+用法示例代码块+worker 数决策表精简版），双语，~35 行/语言。顺手修：README-zh:100 残留的旧术语「学城链接」（前次清理漏网，改「文档链接」）。
 
 ## 四、测试与验收
 
