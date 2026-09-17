@@ -29,14 +29,14 @@ argument-hint: <被审对象与审查目标> [--project-dir DIR] [--out <报告�
 
 ### 1.2 模式声明节（## 模式声明（adversarial 对抗审查模式））
 
-六条，对应 spec §3：
+六条，对应 spec §3（注：实列七项，第 6 项中断对齐锚是 plan 自审新增的落地规则，已同步回 spec 见下）：
 
 1. 模式定位（输入=PR diff/方案文档/调研报告等已有产出，输出=收敛审查报告，非代码改动）。执行阶段语义覆盖 core 的 dev-N 骨架（无 total_phases，覆盖即完整裁定）——**phase 归属声明**：supervisor 侧 `ingest|assign|merge` 不占 workers[].phase，worker 侧 `round1 → cross-1 →（必要时）cross-2 → done` per-worker 流转。
 2. **core 启动步骤 8 的模式层覆盖**：收到 WORKER REGISTER 照常登记（校验+写 workers[]），初始指令暂缓——assign 定稿后按视角分配表补发，**补发时 worker 的 phase 直接置 `round1`**（不走 core 默认的 dev-1/前置首阶段语义；上报 Phase 字段填 round1/cross-1 实际值，同 abstract 对 WORKER REPORT 模板 Phase 字段的覆盖方式）。此条必须显式写明（防无视角指令先发出去）。
 3. registry 注册 `--mode adversarial`。
 4. `--out` 落点纪律（同 abstract 第 16 行）：显式传参启动即校验父链，缺省启动只校验 `docs/adversarial/` 可创建，完整路径 assign 定题后随初始指令下发。
-5. **worker-facing 五项统一下发**（worker 读不到模式层，对齐 abstract 五项下发清单）：①视角 scope（审查清单+排除项）；②round1 纪律（findings 只在消息体内上报、每条含观点+锚点+置信+证伪判据）；③cross 纪律（匿名并集逐条三态回应、允许新增、不得揣测对手身份）；④时限约定（大 PR 建议 120 分钟，覆盖 core 默认 60 分钟）与超时中间上报义务；⑤**审查零 commit 纪律**（审查是只读任务，被审仓库内 worker 零 commit、零落盘——与 abstract 相反的显式差异；报告由监工在 merge 后统一落盘 --out，worker 不碰 git，自然无 trailer/rename 窗口问题）。
-6. **中断对齐锚**（round1 产出在消息体不落盘，worker 崩溃恢复需替代锚）：初始指令下发时与 worker 显式约定——崩在 round1 中间，resume 唤醒后以**监工分片已登记的 findings 清单**为断点（监工下发 cross-1 时把该 worker 已收到的 findings 原样回显），重干未上报部分、不重干已登记部分；监工崩了同样以分片重建状态。worker 无法自查分片，断点真值在监工侧。
+5. **worker-facing 五项统一下发**（worker 读不到模式层，对齐 abstract 五项下发清单）：①视角 scope（审查清单+排除项）；②round1 纪律（findings 只在消息体内上报、每条含观点+锚点+置信+证伪判据，**含 WORKER REPORT 模板产出物字段的覆盖声明：产出物填「见消息体 findings 清单」**——不填文件路径，防 worker 落盘共享路径破坏隔离）；③cross 纪律（匿名并集逐条三态回应、允许新增、不得揣测对手身份）；④时限约定（大 PR 建议 120 分钟，覆盖 core 默认 60 分钟）与超时中间上报义务；⑤**审查零 commit 纪律**（审查是只读任务，被审仓库内 worker 零 commit、零落盘，覆盖 worker 默认「每 Phase 必须立即 commit」——与 abstract 相反的显式差异；报告由监工在 merge 后统一落盘 --out，worker 不碰 git，自然无 trailer/rename 窗口问题）。
+6. **中断对齐锚**（round1 产出在消息体不落盘，worker 崩溃恢复需替代锚）：初始指令下发时与 worker 显式约定——崩在 round1 中间，resume 唤醒后以**监工分片已登记的 findings 清单**为断点（监工下发 cross-1 时把该 worker 已收到的 findings 原样回显），重干未上报部分、不重干已登记部分；监工崩了同样以分片重建状态。worker 无法自查分片，断点真值在监工侧。**唤醒消息模板覆盖**：core 唤醒模板的「先用 git log/git status 对齐」对本模式是 no-op，resume 唤醒词必须改为「先向监工案 findings 回显对齐」（否则 worker 可能白烧一轮做 git 考古）。
 7. 两个汇合点声明（core「该 phase 明确需要汇合」例外条款的适用者）：① round1 全员收齐→监工建匿名并集→统一下发 cross-1；② cross-1 回应全员收齐→判争议，有未收敛争议项才发 cross-2。
 
 ### 1.3 前置阶段节（## 前置阶段（adversarial））
@@ -80,14 +80,14 @@ argument-hint: <被审对象与审查目标> [--project-dir DIR] [--out <报告�
 3. FAQ 决策树（:184 / zh:174+）：加「审已有产出（PR/方案/调研报告）→ /adversarial」分支。
 4. 文件清单（Repository Layout :203+ / zh:194+）：four mode layers → five mode layers。
 5. 英文版 Uninstall（:192+）：命令清单加 `adversarial.md`；中文版对应节同步。
-6. 模式专章：README 现有四模式各有专章（rework/research/abstract 各一节）——adversarial 加一节（两轮结构一段+用法示例代码块+worker 数决策表精简版），双语，~35 行/语言。顺手修：README-zh:100 残留的旧术语「学城链接」（前次清理漏网，改「文档链接」）。
+6. 模式专章：README 现有四模式各有专章（rework/research/abstract 各一节）——adversarial 加一节（两轮结构一段+用法示例代码块+worker 数决策表精简版），双语，~35 行/语言。（注：前次自审所称 README-zh:100「学城链接」残留经 subagent 复核不成立——该处已是「文档目录/文档链接」，术语清理已完整，无需顺手修。）
 
 ## 四、测试与验收
 
 无新自动化测试（模式层是 prompt 协议文本，三套既有回归测试 registry/stopfailure/watchdog 不覆盖模式层内容，本模式无 hooks/代码改动故零回归风险）；验收按 spec DoD 执行：
 
 1. **拼接过断言**：`bash install.sh` 全装一遍，确认 adversarial.md 拼接产物过三个结构断言（frontmatter/core 必含节/无重复标题），`~/.claude/commands/adversarial.md` 内容完整（模式层+core 全量）。
-2. **真机冒烟（主验收）**：本仓真实 merge commit 跑全链路，2 路视角（架构+唱反调）。冒烟对象候选：v3 merge `6e3bfc8` 为 5132 行插入，按决策表属 4-6 路量级——冒烟用它是为了验证协议全链路而非规模适配，2 路由用户在 assign 裁决时明确选定（走「用户裁决可超/低于推荐值」路径，同时验证该裁决机制）；或换一个中型 commit（300-2000 行）让推荐值与 2 路自洽。核验五点：round1 两路 findings 零互相引用痕迹（隔离生效）；cross-1 三态回应覆盖；锚点抽查执行记录（监工亲开锚点）；报告五节齐全；Phase 字段上报 round1/cross-1 实际值。
+2. **真机冒烟（主验收）**：本仓真实 merge commit 跑全链路，2 路视角（架构+唱反调）。冒烟对象选**中型 commit（300-2000 行插入）**，使推荐值与 2 路自洽——注意 v3 merge `6e3bfc8` 不适用：实测 5132 行插入已过决策表「>5000 行建议先拆再审」阈值，且 spec 只赋予用户「±1」调整权（从 4-6 降到 2 无规则依据），选中型 commit 是唯一 spec 合规路径。核验六点：round1 两路 findings 零互相引用痕迹（隔离生效）；cross-1 三态回应覆盖；锚点抽查执行记录（监工亲开锚点）；报告五节齐全；Phase 字段上报 round1/cross-1 实际值；无锚点 finding 处理路径（REFINE 打回补锚点）至少出现一次或如实标注未出现。
 3. **降级路径冒烟**：小 diff（<300 行）单 worker 多视角跑通，报告含「未隔离审查」标注。
 4. **N≥3 语义**：桌面演练（构造 3 路视角的人工推演文档）验证并集下发与混合多数/少数判据，条件不允许则报告如实标注未验证。
 5. 三套既有回归测试全绿（零回归确认）。
