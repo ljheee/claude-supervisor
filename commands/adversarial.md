@@ -10,10 +10,10 @@ argument-hint: <被审对象与审查目标> [--project-dir DIR] [--out <报告�
 ## 模式声明（adversarial 对抗审查模式）
 
 - 本命令为**对抗审查模式**（输入是已有产出——PR diff/方案文档/调研报告，输出是收敛审查报告，不是代码改动。**对抗性来自隔离，不来自 prompt 声明**：多路独立会话各持视角、互不可见、匿名交叉）。**执行阶段语义覆盖 core 的 dev-N 骨架（无 total_phases，覆盖即完整裁定）**，且 phase 分两侧归属：**supervisor 侧** `ingest|assign|merge`（不占 workers[].phase）；**worker 侧** `round1 → cross-1 →（必要时）cross-2 → done`（占 workers[].phase，per-worker 流转）。收尾照 core 状态机第 4 步执行，不得套用 total_phases/Phase N+1 规则。
-- **core 启动步骤 8 的本模式覆盖**：收到 WORKER REGISTER 照常登记（校验+写 workers[]），但**初始指令暂缓**——assign 定稿后按视角分配表补发。补发时该 worker 的 phase 直接置 `round1`（不走 dev-1/前置首阶段语义；WORKER REPORT 的 Phase 字段填 round1/cross-1 实际值，不得写 dev-N）。
-- registry 注册时 `--mode adversarial`。
+- **core 启动步骤 8 的本模式覆盖**：收到 WORKER REGISTER 照常登记（校验+写 workers[]），但**初始指令暂缓**——assign 定稿后按视角分配表补发。补发时该 worker 的 phase 直接置 `round1`（走 round1 语义，不是 dev-1/前置首阶段；WORKER REPORT 的 Phase 字段填 round1/cross-1 实际值，不得写 dev-N）。
+- registry 注册时 `--mode adversarial`（本模式层将 core 的 `--mode <greenfield|rework|research|abstract>` 枚举替换为本值——registry.py 接受任意 mode 字符串，拼接产物层面以本模式声明为准）。
 - `--out <报告目录>`：报告的落盘目录。显式传参时启动即校验（父链存在或可 `mkdir -p` 创建，不可写 ESCALATE）；**缺省时启动只校验 `<project-dir>/docs/adversarial/` 可创建**——完整路径的 `<日期-主题>` 主题词要 assign 定题后才确定，由你定题后随初始指令显式下发（worker 不自己猜，但本模式报告由你 merge 后统一落盘，worker 不落盘任何文件）。
-- **worker-facing 约束统一下发**（worker 只读 worker.md，读不到本模式层）：初始指令除 core 必含项外，必须完整下发五项：①**视角 scope**（该 worker 的视角名+审查清单+明确排除项，写入 `workers[].scope`）；②**round1 纪律**——findings 只在 WORKER REPORT 消息体内上报（产出物字段填「见消息体 findings 清单」，不落任何文件），每条含观点+锚点+置信+证伪判据，无锚点会被退回补（两次不补撤回该条）；③**cross 纪律**——对匿名并集逐条三态回应：反驳（附反证锚点）/确认（升级置信）/撤回（说明原因），允许新增；不得揣测或标注对手身份；④**时限约定**——round1 与单轮 cross 的失联判定时限随材料规模显式约定（大 PR 建议 120 分钟，覆盖 core 默认 60 分钟），超时必须上报中间 findings+缺口清单（覆盖「不干完里程碑不上报」默认纪律）；⑤**审查零 commit 纪律**——审查是只读任务，被审仓库内零 commit、零落盘（覆盖「每 Phase 必须立即 commit」默认纪律），报告由你 merge 后统一落盘 `--out`。
+- **worker-facing 约束统一下发**（worker 只读 worker.md，读不到本模式层）：初始指令除 core 必含项外，必须完整下发五项：①**视角 scope**（该 worker 的视角名+审查清单+明确排除项，写入 `workers[].scope`）；②**round1 纪律**——findings 只在 WORKER REPORT 消息体内上报（产出物字段填「见消息体 findings 清单」，不落任何文件），每条含观点+锚点+置信+证伪判据，并自标证据级别（A 一手实测/B 源码定位/C 官方文档/D 二手转述/E 显式推测，沿用 research 五级），无锚点会被退回补（两次不补撤回该条）；③**cross 纪律**——对匿名并集逐条三态回应：反驳（附反证锚点）/确认（升级置信）/撤回（说明原因），允许新增；不得揣测或标注对手身份；④**时限约定**——round1 与单轮 cross 的失联判定时限随材料规模显式约定（大 PR 建议 120 分钟，覆盖 core 默认 60 分钟），超时必须上报中间 findings+缺口清单（覆盖「不干完里程碑不上报」默认纪律）；⑤**审查零 commit 纪律**——审查是只读任务，被审仓库内零 commit、零落盘（覆盖「每 Phase 必须立即 commit」默认纪律），报告由你 merge 后统一落盘 `--out`。
 - **中断对齐锚**：round1 产出在消息体不落盘，worker 崩在 round1 中间、resume 唤醒后以**你分片已登记的该 worker findings 清单**为断点（你把已收到的原样回显），重干未上报部分、不重干已登记部分；你自己崩了同样以分片重建状态。**唤醒词必须覆盖 core 默认**：不用「先用 git log/git status 对齐」（对零 commit 审查者是 no-op），改为「先向监工案 findings 回显对齐」。
 - **两个汇合点**（core「该 phase 明确需要汇合」例外条款的适用者，先行者上报后 phase 停在原处等待）：① round1 全员收齐 → 你建匿名并集 → 统一下发 cross-1；② cross-1 回应全员收齐 → 判争议，有未收敛争议项才下发 cross-2（cross 最多 2 轮，Loop Guard：仍僵持标「用户裁决项」止）。
 - 非 git 目录**允许**（被审对象常是文档目录，与 rework 的 git 断言相反的显式差异）。未合并 PR：ingest 时与用户确认检出方式（本地 fetch PR ref 或用户已 checkout 的分支），拿不到稳定 ref 则 ESCALATE。
@@ -26,9 +26,9 @@ argument-hint: <被审对象与审查目标> [--project-dir DIR] [--out <报告�
 
 ## round1/cross 特化（adversarial）
 
-**round1 收到上报你必做**（命令式动作）：把该 worker 的 findings 原文登记入**你的分片账本**（`.supervisor/<你的sid>/` 下，作为断点真值）；无锚点 finding 退回补锚点（两次不补撤回该条并记录）；证据分级沿用 research 五级（要求 worker 对每条 finding 自标级别）；空话检查沿用 abstract 判据（逐条自问「被证伪会看到什么」，答不上要求降级为观察）。
+**round1 收到上报你必做**（命令式动作）：把该 worker 的 findings 原文登记入**你的分片账本**（`.supervisor/<你的sid>/` 下，作为断点真值）；无锚点 finding 退回补锚点（两次不补撤回该条并记录）；核对每条证据级别已自标（缺失随退回补）；空话检查沿用 abstract 判据（逐条自问「被证伪会看到什么」，答不上要求降级为观察）。
 
-**cross-1 全员收齐后你必做**：建**匿名并集**（去掉视角署名与任何可识别来源的措辞——防权威跟随；N=2 时匿名化如实标注为形式统一）；统一下发给每方（每方收到的是其他方 findings 的并集，含自己的除外）；下发时把该 worker round1 已登记的 findings 原样回显（断点对齐）。cross-1 回应收齐后判争议：每条 finding 按三态收敛——**至少两路独立一致**（单方主张且回应中显式无异议视同一致；无回应不算）/ **单方坚持且经攻防** / **明确撤回**；N≥3 混合情形：多数确认+少数反驳=判「一致」，少数反驳作为「少数意见」附注（不升级争议项）；但反驳附反证锚点且多数方未回应该反证的，进争议项。
+**cross-1 全员收齐后你必做**：建**匿名并集**（去掉视角署名与任何可识别来源的措辞——防权威跟随；N=2 时匿名化如实标注为形式统一）；统一下发给每方，每方收到的并集只含**其他方**的 findings（自己的不回发——防自证）；下发时把该 worker round1 已登记的 findings 原样回显（断点对齐）。cross-1 回应收齐后判争议：每条 finding 按三态收敛——**至少两路独立一致**（单方主张且回应中显式无异议视同一致；无回应不算）/ **单方坚持且经攻防** / **明确撤回**；N≥3 混合情形：多数确认+少数反驳=判「一致」，少数反驳作为「少数意见」附注（不升级争议项）；但反驳附反证锚点且多数方未回应该反证的，进争议项。
 
 **merge（全部 worker done 后你必做）**：**锚点抽查**——亲自打开若干 finding 锚点核对与被审对象相符（锚点指向不存在/内容不符即撤回该 finding；系统性造假→该视角全部 findings 撤回并整轮重审——比 research 单章 REFINE 更强的本模式增强）；**覆盖对账**——被审对象×视角矩阵逐项核对（不只信 worker 的矩阵自报）；**减员处理**——worker 永久失联走 core ESCALATE 后剩余 ≥2 路继续（缺方未被交叉的 findings 标「因减员未交叉」），剩余 <2 路降级单路汇总（整份报告标「对抗结构未成立」，如实呈现不硬装收敛）；**报告落盘**——你统一写入 `--out`（worker 零落盘）；最后向用户出总结。
 
