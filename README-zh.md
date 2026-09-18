@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/ljheee/claude-supervisor/main/insta
 # 或 SUPERVISOR_REPO_URL=<url> sh ./install.sh
 ```
 
-安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/worker` 五个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py 与 watchdog（→ `~/.claude/supervisor/`，registry.json 写操作全经前者）。已有同名文件先备份再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言，失败同样中止不留半成品。
+安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/adversarial`、`/worker` 六个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract/adversarial 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py 与 watchdog（→ `~/.claude/supervisor/`，registry.json 写操作全经前者）。已有同名文件先备份再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言，失败同样中止不留半成品。
 
 版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。桌面通知用 osascript，目前仅支持 macOS（其余功能全平台可用）。
 
