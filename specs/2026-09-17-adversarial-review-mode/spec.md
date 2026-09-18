@@ -14,7 +14,7 @@
 
 **目标**：一个 supervisor + N 个各持独立视角的 reviewer worker，两轮结构（独立审→交叉攻击），supervisor 合并去重出收敛报告，每条发现带锚点与置信分级。
 
-**非目标**：自动拉起 worker 会话（Claude Code 无跨会话 spawn API，只能推荐数量+引导用户开终端）；替代 CI 静态检查（lint/类型错误走既有工具，本模式只审「工具查不出的判断性问题」）；实时 IDE 内 review（本模式是异步批处理形态）。
+**非目标**：替代 CI 静态检查（lint/类型错误走既有工具，本模式只审「工具查不出的判断性问题」）；实时 IDE 内 review（本模式是异步批处理形态）。**worker 通道**：终端 worker（用户开终端跑 /worker 注册的独立会话）是基准通道；监工自身的 subagent 是**限定条件下的合法备选通道**（规则见 §8），不是非目标也不是默认。
 
 ## 2. 对抗性的结构来源（设计公理）
 
@@ -83,3 +83,17 @@
 - **cross 期间的减员**（参与者锁定）：worker 永久失联走 core 既有 ESCALATE 路径后，剩余 ≥2 路 → 继续流程，缺方未被交叉的 findings 标「因减员未交叉」；剩余 <2 路 → 降级为单路汇总，整份报告标注「对抗结构未成立」，如实呈现已有产出不硬装收敛。
 - **PR 场景的基线锚**：审 PR 用 `git diff <base>..head`，与 rework 的范围比对同构；PR 未合并前 worktree 检出方式（本地分支 vs fetch PR ref）实施时定。
 - **视角中文/英文术语表**：实施时随模式层定稿，与既有协议措辞风格一致（中文协议正文）。
+
+## 8. worker 通道（终端 vs 监工 subagent）
+
+2026-09-18 mall-label-manage 实测记录：监工在 assign 定稿后未等终端注册，自行用自身 Task 工具 spawn 4 路 subagent 充当 worker，全链路跑通且产出质量经独立核验成立（2 BLOCKER 字节码级实证，24 条确认零锚点造假）。同日对 Claude Code 2.1.259（经 mc --code 通道）做了机制实证，据此把 subagent 通道合法化并写入边界：
+
+**机制实证结论**（三实验）：① spawn 返回 agentId，同一会话内用 SendMessage 可带完整 transcript 复活该 agent（续问只耗 23 token，记忆延续非重跑）——**会话内可续**；② 新会话拿同一 agentId resume 被拒（「only resumable from the session that spawned it, while that session is alive」）——**跨会话即失，监工崩了 resume 回来四条 subagent 线全部丢失**；③ subagent 只看到 spawn prompt，主会话/其他会话内容零泄漏——round1 隔离的机制依据。
+
+**通道规则**：
+- 默认仍为终端 worker（用户开终端注册）：跨天/崩溃恢复/五层防御全量覆盖，基准通道。
+- 监工 subagent 为合法备选：仅限单次审查任务内（同一场 run），且必须**后台模式**（spawn 后结束回合，收完成通知再推进——同步等待会阻塞监工整轮，巡检/心跳全冻结）。
+- **agentId 必须落账本**：spawn 后立即写入 state.json 的 workers[] 条目（字段如 `agent_handle`），不得只活在监工上下文里——这是 09-18 那场的实证缺口（监工未记 agentId，若中途崩溃四条线无法重建）。
+- 监工崩溃恢复后的 subagent 线索默认**不可 resume**（跨会话即失），按既有中断对齐锚重建：从分片已登记 findings 回显，新 spawn 补齐缺失视角。
+- 防御形态差异如实标注：subagent 无 session_id（无 SessionStart 注入/registry 交叉验证/watchdog 可见性），中断以当轮工具错误回流监工（更短路径但依赖监工活着）；报告视角清单标注每路 worker 的通道。
+- 禁止自作主张切通道：监工默认等待终端注册，改用 subagent 通道需在 assign 裁决时向用户明示并获批（09-18 那场未经裁决自行 spawn 属违规，尽管结果成立——模式层需把本约束写死）。
