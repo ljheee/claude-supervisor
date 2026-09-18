@@ -44,6 +44,7 @@
 - `--out <报告目录>`：默认 `docs/adversarial/<日期-主题>/`，落点纪律同 abstract（显式传参启动即校验父链可创建，缺省时启动只校验 `docs/adversarial/` 可创建，完整路径 assign 定题后下发）。
 - **worker-facing 约束统一下发**（worker 读不到本模式层，与 abstract 五项下发同构）：初始指令除 core 必含项外必须完整下发五项：①视角 scope（审查清单+排除项）；②round1 纪律（findings 只在 WORKER REPORT 消息体内上报、不落共享路径文件，**含 WORKER REPORT 模板产出物字段的覆盖声明：产出物填「见消息体 findings 清单」**；每条含观点+锚点+置信+证伪判据，无锚点即被退回补）；③cross 纪律（对匿名并集逐条三态回应：反驳附反证锚点/确认/撤回，允许新增；不得揣测或标注对手身份）；④时限约定（round1 与单轮 cross 的失联判定时限随材料规模在首个指令显式约定——大 PR 建议 120 分钟，覆盖 core 默认 60 分钟）与超时中间上报义务（超时上报中间 findings+缺口清单，覆盖 worker「不干完里程碑不上报」默认纪律）；⑤**审查零 commit 纪律**（审查是只读任务，被审仓库内 worker 零 commit、零落盘，覆盖 worker 默认「每 Phase 必须立即 commit」——报告由监工在 merge 后统一落盘 --out，worker 不碰 git）。
 - **中断对齐锚**（round1 产出在消息体不落盘，worker 崩溃恢复需替代锚）：初始指令下发时与 worker 显式约定——崩在 round1 中间，resume 唤醒后以监工分片已登记的 findings 清单为断点（监工把该 worker 已收到的 findings 原样回显），重干未上报部分、不重干已登记部分；监工崩了同样以分片重建状态。**唤醒消息模板覆盖**：core 唤醒模板的「先用 git log/git status 对齐」对本模式是 no-op，resume 唤醒词改为「先向监工处 findings 回显对齐」（终端 worker：重开会话后向监工发消息取回显；subagent worker：无主动消息通道，由监工在 SendMessage 续命 prompt 里主动携带回显——否则 worker 可能白烧一轮做 git 考古）。
+- **round1/cross 上报回执**：监工收到干净上报只发「已登记，等待汇齐」回执（不发 APPROVE——APPROVE 会触发 worker 按默认协议自行推进，绕过汇合点）；round1/cross 由监工收齐全员后统一下发下一轮指令推进，是本模式对 core「VERDICT: APPROVE → 按指示进入下一阶段」默认流转的覆盖。判 REFINE 的例外：带问题清单打回重报，仍属当前轮。
 - 报告结构：TL;DR（按严重度排序的确认发现）/ 争议项（各方论点+锚点并列，供用户裁决）/ 撤回记录（审查过程可信度的自证）/ 覆盖对账（材料×视角矩阵）/ 视角清单（含各自排除项）。
 
 ## 4. worker 数量推荐（assign 阶段决策表）
@@ -81,7 +82,7 @@
 
 - **cross 轮的匿名性边界**：匿名化防权威跟随，但写作风格可能泄露视角身份——接受（防的是内容跟随不是完全盲审），报告如实标注该边界。另：N=2 时匿名化无实际隐藏作用（对手只有一人，全量即其人），保留统一协议只为实现简单，此边界如实标注。
 - **cross 期间的减员**（参与者锁定）：worker 永久失联走 core 既有 ESCALATE 路径后，剩余 ≥2 路 → 继续流程，缺方未被交叉的 findings 标「因减员未交叉」；剩余 <2 路 → 降级为单路汇总，整份报告标注「对抗结构未成立」，如实呈现已有产出不硬装收敛。
-- **PR 场景的基线锚**：审 PR 用 `git diff <base>..head`，与 rework 的范围比对同构；PR 未合并前 worktree 检出方式（本地分支 vs fetch PR ref）实施时定。
+- **PR 场景的基线锚**：审 PR 用 `git diff <base>..head`，与 rework 的范围比对同构。PR 未合并时检出方式已定案：ingest 时与用户确认（本地 fetch PR ref 或用户已 checkout 的分支），拿不到稳定 ref 则 ESCALATE。
 - **视角中文/英文术语表**：实施时随模式层定稿，与既有协议措辞风格一致（中文协议正文）。
 
 ## 8. worker 通道（终端 vs 监工 subagent）
