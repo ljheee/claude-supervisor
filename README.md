@@ -11,12 +11,13 @@ What lets you walk away:
 - **Crashes resume, never restart from zero**: all progress is persisted in sharded ledgers under `.supervisor/`; a crashed worker or supervisor realigns with the ledger and carries on. "Back to square one overnight" is not an outcome this design allows.
 - **Someone watches the watcher**: a watchdog runs from the system crontab, checking every 10 minutes for silent workers and supervisor heartbeats, and pops a desktop notification when thresholds are exceeded.
 
-Four modes are supported:
+Five modes are supported:
 
 - **Greenfield** (`/supervisor`, build a new project from scratch).
 - **Rework** (`/rework`, patch/refactor an existing project — archaeology baseline + regression safety net + frozen-behaviors list).
 - **Research** (`/research`, investigation/exploration tasks — produces reports and evidence, not code changes).
 - **Abstract** (`/abstract`, synthesis — distills the high-level propositions that govern a pile of existing material).
+- **Adversarial review** (`/adversarial`, review existing output — PR diffs / design docs / research reports — with multiple isolated perspectives, anonymous cross-attack, and a convergent report).
 
 It's a combination of hard-coded safety nets plus a prompt protocol: interruption detection, shard guards, and external watch never depend on the model's own diligence — if the model degrades, the safety nets keep working (worst case shrinks from "never noticed" to "noticed a bit late"). Full motivation and design origins: [WHY_ME.md](WHY_ME.md); design principles, reverse-engineering notes, and the interruption model: [DESIGN.md](DESIGN.md).
 
@@ -98,6 +99,25 @@ The research front phases are "problem definition → survey plan": a fuzzy rese
 
 Inside a git repo the report follows commit discipline; in non-git directories, writing to disk is delivery.
 
+## Adversarial Review Tasks (adversarial mode)
+
+Already have an output — a PR diff, a design doc, a research report — and want real criticism instead of a single pass that mixes true and false findings? Use `/adversarial`:
+
+```bash
+# Terminal A: any directory (non-git works — the reviewed object is
+# often documents; a PR just needs a stable ref)
+claude
+> /adversarial review the completeness of design doc X / PR #123 [--out <report-dir>]
+
+# Terminal B (same directory, one per perspective)
+claude
+> /worker
+```
+
+The design axiom: **adversarialness comes from isolation, not from prompt declarations**. Each reviewer worker holds one perspective in an independent session (workers can't see each other's findings — they travel only in report messages and the supervisor's shard ledger), then attack each other's findings through an anonymized union. Two rounds: round1 (independent solo review, mutually invisible) → cross-1 (each side must respond to every finding from the others: rebut with counter-anchor / confirm / withdraw; a second cross round only if unresolved disputes remain, capped at 2). The supervisor merges into a three-state convergence — "at least two independent perspectives agree" / "one side held after attack-and-defense" / "explicitly withdrawn" — and unresolved items land in the report as *user-adjudication items*, not infinite rounds. Every finding must carry an anchor + confidence + a falsifiability test; the supervisor spot-checks anchors, and systematic fabrication withdraws that perspective's entire findings set.
+
+Worker-count recommendation at assign time (user adjudicates): <300-line single-module diff → 1 (degraded multi-perspective sweep, report marked "not isolated"); mid-size PR / single-topic doc → 2 (implementer + devil's advocate); cross-module / architecture / concurrency-sensitive → 3-4; money-touching / data migration / >2000 lines → 4-6 (over 5000 lines: split the PR first). Workers you name when assigning the task are hard constraints — never trimmed, may exceed the recommendation. The supervisor may also spawn workers as its own background subagents instead of terminals, but only with your explicit approval at assign adjudication (subagents have no session_id — five-layer defense doesn't cover them, and they die with the supervisor session; the protocol compensates by keeping all state in the supervisor's shard ledger). The report has five sections: TL;DR / disputed items (all sides' arguments + anchors, for your adjudication) / withdrawal record / coverage reconciliation (material × perspective matrix) / perspective list.
+
 ## Synthesis Tasks (abstract mode)
 
 A pile of existing material (a few reports/articles, a dozen scattered code changes, some verbal context) and you want the high-level structure distilled from it? Use `/abstract`:
@@ -163,9 +183,10 @@ Also: the host's notify_when_idle notices refresh a worker's liveness clock when
 - `/rework <change-goal> [--project-dir DIR] [--baseline <git-ref>]`: rework/refactor supervisor (front phases archaeology→safety-net→spec→plan, with the frozen-behaviors list and the drive-by-refactor red line).
 - `/research <research-goal> [--project-dir DIR] [--out <report-dir>]`: research/exploration supervisor (front phases scope→survey, one dev unit per chapter; five-level evidence grading + read-only product code + conclusion reconciliation; non-git directories supported).
 - `/abstract <synthesis-goal-and-material-source> [--project-dir DIR] [--out <report-dir>]`: synthesis supervisor (front phases ingest→distill, refine-N adversarial rework; coverage reconciliation + back-referencing anchors + anchor spot-checks + empty-talk checks, input surface locked; non-git directories supported).
+- `/adversarial <reviewed-object-and-goal> [--project-dir DIR] [--out <report-dir>]`: adversarial-review supervisor (front phases ingest→assign, worker phases round1→cross-1→(cross-2)→done; isolated perspectives + anonymized cross-attack + three-state convergence, anchor discipline + anchor spot-checks; non-git directories supported; terminal workers by default, supervisor-spawned subagents with explicit user approval).
 - `/worker [--supervisor <session-name>]`: registers the current session as a supervised worker (mode-agnostic). Includes the reporting protocol and the interruption-recovery protocol. `--supervisor` takes a **session name** (the only addressable key SendMessage accepts; without it the worker reads `.supervisor/registry.json` and picks a supervisor — a single active entry is chosen directly; multiple entries are listed for you to designate).
 
-The four modes share one core protocol (identity / five-layer interruption defense / ledger / OODA / three-layer answer firewall), spliced into each command at install time.
+The five modes share one core protocol (identity / five-layer interruption defense / ledger / OODA / three-layer answer firewall), spliced into each command at install time.
 
 ## Multiple Supervisors Coexisting
 
@@ -181,9 +202,9 @@ When a supervisor dies unexpectedly, its registry entry remains: a worker that f
 
 ## FAQ
 
-- **Greenfield vs rework vs research vs abstract**: existing code to change → `/rework` (archaeology + safety net first); from scratch → `/supervisor`; output is a report → `/research` (problem definition + evidence grading, product code untouched); a pile of material to distill → `/abstract` (coverage reconciliation + anchor spot-checks, input surface locked).
+- **Greenfield vs rework vs research vs abstract vs adversarial**: existing code to change → `/rework` (archaeology + safety net first); from scratch → `/supervisor`; output is a report → `/research` (problem definition + evidence grading, product code untouched); a pile of material to distill → `/abstract` (coverage reconciliation + anchor spot-checks, input surface locked); an existing output to review → `/adversarial` (isolated perspectives + cross-attack + three-state convergence).
 - **Worker can't find the supervisor**: run `/rename supervisor` in the supervisor terminal to fix the name, then have the worker retry; also confirm both sides are in the intended directory.
-- **Supervisor behavior drifts** (protocol dilution after a long session gets compacted): re-run the mode's command (`/supervisor`, `/rework`, `/research`, `/abstract`) to re-inject the protocol; state.json restores the full context.
+- **Supervisor behavior drifts** (protocol dilution after a long session gets compacted): re-run the mode's command (`/supervisor`, `/rework`, `/research`, `/abstract`, `/adversarial`) to re-inject the protocol; state.json restores the full context.
 - **The supervisor isn't 100% reliable (known boundary)**: the supervisor's persona comes from prompt injection; compliance can't be guaranteed. This suite's hedge: interruption-detection triggers (hooks/watchdog) are hard code that doesn't depend on supervisor diligence; progress lives in state.json, so drift is recoverable by re-injection; soft failures (missed patrols, etc.) have their consequences bounded by the hard safety nets to "noticed late" instead of "never noticed". See DESIGN.md section 9.
 - **Suspect a hook isn't firing**: run `bash test_stopfailure.sh`, `bash test_watchdog.sh`, and `bash test_registry.sh` (assertion-based sandboxed tests, no real data touched); after a real interruption, check `.supervisor/<sid>/interrupts.jsonl` (`<sid>` is the supervisor's session_id; the legacy flat layout is `.supervisor/interrupts.jsonl`) for new entries.
 - **Want to run the watchdog manually**: `~/.claude/supervisor/supervisor-watchdog /path/to/repo 60` (project directory + threshold minutes, default 60).
@@ -192,7 +213,7 @@ When a supervisor dies unexpectedly, its registry entry remains: a worker that f
 ## Uninstall
 
 ```bash
-rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/research.md ~/.claude/commands/abstract.md ~/.claude/commands/worker.md
+rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/research.md ~/.claude/commands/abstract.md ~/.claude/commands/adversarial.md ~/.claude/commands/worker.md
 rm -rf ~/.claude/hooks/claude-supervisor
 rm -rf ~/.claude/supervisor
 # Also remove the matching entries from the hooks.StopFailure /
@@ -202,4 +223,4 @@ rm -rf ~/.claude/supervisor
 
 ## Repository Layout
 
-The core protocol `commands/_core-supervisor.md` + four mode layers (`commands/*.md`) + the worker protocol `commands/worker.md`, spliced and distributed by `install.sh` at install time; the four hooks and `registry.py` live in `hooks/`; the watchdog is `watchdog.sh` at the repo root; three regression tests `test_*.sh`; each iteration's spec/plan archives in `specs/` (with design decisions and CR records); technical design principles in [DESIGN.md](DESIGN.md).
+The core protocol `commands/_core-supervisor.md` + five mode layers (`commands/*.md`) + the worker protocol `commands/worker.md`, spliced and distributed by `install.sh` at install time; the four hooks and `registry.py` live in `hooks/`; the watchdog is `watchdog.sh` at the repo root; three regression tests `test_*.sh`; each iteration's spec/plan archives in `specs/` (with design decisions and CR records); technical design principles in [DESIGN.md](DESIGN.md).
