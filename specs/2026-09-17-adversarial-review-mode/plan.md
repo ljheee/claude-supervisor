@@ -36,7 +36,7 @@ argument-hint: <被审对象与审查目标> [--project-dir DIR] [--out <报告�
 3. registry 注册 `--mode adversarial`。
 4. `--out` 落点纪律（同 abstract 第 16 行）：显式传参启动即校验父链，缺省启动只校验 `docs/adversarial/` 可创建，完整路径 assign 定题后随初始指令下发。
 5. **worker-facing 五项统一下发**（worker 读不到模式层，对齐 abstract 五项下发清单）：①视角 scope（审查清单+排除项）；②round1 纪律（findings 只在消息体内上报、每条含观点+锚点+置信+证伪判据，**含 WORKER REPORT 模板产出物字段的覆盖声明：产出物填「见消息体 findings 清单」**——不填文件路径，防 worker 落盘共享路径破坏隔离）；③cross 纪律（匿名并集逐条三态回应、允许新增、不得揣测对手身份）；④时限约定（大 PR 建议 120 分钟，覆盖 core 默认 60 分钟）与超时中间上报义务；⑤**审查零 commit 纪律**（审查是只读任务，被审仓库内 worker 零 commit、零落盘，覆盖 worker 默认「每 Phase 必须立即 commit」——与 abstract 相反的显式差异；报告由监工在 merge 后统一落盘 --out，worker 不碰 git，自然无 trailer/rename 窗口问题）。
-6. **中断对齐锚**（round1 产出在消息体不落盘，worker 崩溃恢复需替代锚）：初始指令下发时与 worker 显式约定——崩在 round1 中间，resume 唤醒后以**监工分片已登记的 findings 清单**为断点（监工下发 cross-1 时把该 worker 已收到的 findings 原样回显），重干未上报部分、不重干已登记部分；监工崩了同样以分片重建状态。worker 无法自查分片，断点真值在监工侧。**唤醒消息模板覆盖**：core 唤醒模板的「先用 git log/git status 对齐」对本模式是 no-op，resume 唤醒词必须改为「先向监工案 findings 回显对齐」（否则 worker 可能白烧一轮做 git 考古）。
+6. **中断对齐锚**（round1 产出在消息体不落盘，worker 崩溃恢复需替代锚）：初始指令下发时与 worker 显式约定——崩在 round1 中间，resume 唤醒后以**监工分片已登记的 findings 清单**为断点（监工下发 cross-1 时把该 worker 已收到的 findings 原样回显），重干未上报部分、不重干已登记部分；监工崩了同样以分片重建状态。worker 无法自查分片，断点真值在监工侧。**唤醒消息模板覆盖**：core 唤醒模板的「先用 git log/git status 对齐」对本模式是 no-op，resume 唤醒词必须改为「先向监工处 findings 回显对齐」（否则 worker 可能白烧一轮做 git 考古）。
 7. 两个汇合点声明（core「该 phase 明确需要汇合」例外条款的适用者）：① round1 全员收齐→监工建匿名并集→统一下发 cross-1；② cross-1 回应全员收齐→判争议，有未收敛争议项才发 cross-2。
 
 ### 1.3 前置阶段节（## 前置阶段（adversarial））
