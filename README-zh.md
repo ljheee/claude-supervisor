@@ -11,12 +11,13 @@
 - **崩了能接上**：全部进度落盘在 `.supervisor/` 的分片账本里，worker/监工崩溃后对齐账本接着干，不存在"一夜回到解放前"。
 - **监工自己也有人盯**：watchdog 跑在系统 crontab 里，每 10 分钟查 worker 静默与监工心跳，超时弹桌面通知找你。
 
-支持四种模式：
+支持五种模式：
 
 - **绿地模式**（`/supervisor`，从零开发新项目）。
 - **rework 模式**（`/rework`，老项目修补/重构——考古基线 + 回归安全网 + 不改清单）。
 - **research 模式**（`/research`，调研/探索任务——产出报告与证据而非代码改动）。
 - **abstract 模式**（`/abstract`，抽象提炼——从一堆现成材料提炼支配它们的高层命题）。
+- **对抗审查模式**（`/adversarial`，审查已有产出——PR diff / 方案文档 / 调研报告：多路独立视角 + 匿名交叉攻击 + 收敛报告）。
 
 它是硬代码兜底 + prompt 协议的组合：中断检测、分片守卫、外部盯梢不依赖模型自觉，模型劣化了兜底照常工作（最坏后果从"不发现"压缩为"稍晚发现"）。完整动机与设计出处见 [WHY_ME-zh.md](WHY_ME-zh.md)；设计原理、逆向依据、中断模型见 [DESIGN.md](DESIGN.md)。
 
@@ -33,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/ljheee/claude-supervisor/main/insta
 # 或 SUPERVISOR_REPO_URL=<url> sh ./install.sh
 ```
 
-安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/worker` 五个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py 与 watchdog（→ `~/.claude/supervisor/`，registry.json 写操作全经前者）。已有同名文件先备份再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言，失败同样中止不留半成品。
+安装内容：`/supervisor`、`/rework`、`/research`、`/abstract`、`/adversarial`、`/worker` 六个 slash 命令（→ `~/.claude/commands/`，其中 supervisor/rework/research/abstract/adversarial 由「模式层 + `_core-supervisor.md` 核心协议」在安装期拼接生成）；四个 hook（→ `~/.claude/hooks/claude-supervisor/`，自动注册进 `~/.claude/settings.json` 用户级，幂等）——StopFailure（中断自动上报）、SessionStart（v3 身份注入器）、PreToolUse·Write|Edit（v3 分片守卫）、Stop（模型层异常捕获：model-error/空回合/尾部退化）；registry.py 与 watchdog（→ `~/.claude/supervisor/`，registry.json 写操作全经前者）。已有同名文件先备份再覆盖；settings.json 损坏时备份后**中止安装**，不会重置你的配置；拼接产物过结构断言，失败同样中止不留半成品。
 
 版本要求：Claude Code >= 2.1.259（ListAgents + SendMessage + StopFailure hook + CronCreate/ScheduleWakeup 定时任务）。`claude --version` 确认。桌面通知用 osascript，目前仅支持 macOS（其余功能全平台可用）。
 
@@ -91,6 +92,24 @@ research 模式的前置阶段是「问题定义 → 调研方案」：先把模
 - **产品代码只读红线**（探针与产物只落 `--out` 目录，默认 `docs/research/<日期-主题>/`；git diff 越出报告目录即 REFINE）
 - **结论对账**（done 前逐问核对：要么有答案+置信度，要么显式标未决+原因——查不到必须写明查了什么卡在哪）。单章默认 90 分钟时间盒防无限展开。
 git 仓库内报告照 commit 纪律，非 git 目录落盘即交付。
+
+## 对抗审查任务（adversarial 模式）
+
+已有产出——PR diff、方案文档、调研报告——想要真审查而不是单遍扫（误报混真报、没看的没人知道）？用 `/adversarial`：
+
+```bash
+# 终端A：任意目录（非 git 也行——被审对象常是文档；审 PR 只需一个稳定 ref）
+claude
+> /adversarial 审查XX方案完备性 / 审查 PR #123 [--out <报告目录>]
+
+# 终端B（同一目录，每视角一个）
+claude
+> /worker
+```
+
+设计公理：**对抗性来自隔离，不来自 prompt 声明**。每路 reviewer worker 持一个视角跑在独立会话里（互相看不到对方的 findings——它们只活在上报消息和监工分片账本里），再通过匿名化并集互攻。两轮结构：round1（独立审，互不可见）→ cross-1（每方对其他方每条 finding 必须三选一回应：反驳附反证锚点/确认/撤回；存在未收敛争议才发第二轮，上限 2 轮）。监工合并出三态收敛——「至少两路独立一致 / 单方坚持且经攻防 / 明确撤回」——僵持项进报告标「用户裁决项」，不无限加轮。每条 finding 必须带锚点+置信+证伪判据，监工亲自抽查锚点，系统性造假撤回该视角全部 findings。
+
+worker 数在 assign 时推荐（用户裁决）：<300 行单模块 diff → 1 路（降级单路多视角，报告标「未隔离审查」）；中型 PR/单主题方案 → 2 路（实施者+唱反调）；跨模块/架构/并发敏感 → 3-4 路；涉钱/数据迁移/>2000 行 → 4-6 路（>5000 行建议先拆 PR 再审）。交代任务时点名的视角是硬约束——不裁剪、可超推荐值。监工也可以不开终端、用自己的后台 subagent 充当 worker，但必须在 assign 裁决时获得你的明示批准（subagent 无 session_id，五层防御不覆盖，生命周期与监工绑定；协议靠监工分片账本全量落状态补偿）。报告五节：TL;DR / 争议项（各方论点+锚点并列，供你裁决）/ 撤回记录 / 覆盖对账（材料×视角矩阵）/ 视角清单。
 
 ## 抽象提炼任务（abstract 模式）
 
@@ -155,9 +174,10 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 - `/rework <改造目标> [--project-dir DIR] [--baseline <git-ref>]`：老项目修补/重构模式监工（前置阶段 archaeology→safety-net→spec→plan，含不改清单与顺手重构红线）。
 - `/research <调研目标> [--project-dir DIR] [--out <报告目录>]`：调研/探索模式监工（前置阶段 scope→survey，每章一个 dev 单元；证据五级分级 + 产品代码只读红线 + 结论对账，非 git 目录可用）。
 - `/abstract <提炼目标与材料来源> [--project-dir DIR] [--out <报告目录>]`：抽象提炼模式监工（前置阶段 ingest→distill，refine-N 对抗返工；覆盖对账 + 回指锚点 + 锚点抽查 + 空话检查，输入面锁死，非 git 目录可用）。
+- `/adversarial <被审对象与审查目标> [--project-dir DIR] [--out <报告目录>]`：对抗审查模式监工（前置阶段 ingest→assign，worker 阶段 round1→cross-1→(cross-2)→done；独立视角隔离 + 匿名交叉攻击 + 三态收敛，锚点纪律 + 锚点抽查，非 git 目录可用；默认终端 worker，监工 subagent 通道需用户明示批准）。
 - `/worker [--supervisor <会话名>]`：把当前会话注册成受监工的工人（模式无关）。已含上报协议与中断恢复协议。`--supervisor` 接受**会话名称**（SendMessage 唯一可用寻址键；无此参数时 worker 自动读 `.supervisor/registry.json` 选监工——唯一活跃条目直接选，多条目列出来请你指定）。
 
-四模式共享同一份核心协议（身份/五层中断防御/账本/OODA/三层回答防火墙），由 install.sh 在安装期拼接进各自命令。
+五模式共享同一份核心协议（身份/五层中断防御/账本/OODA/三层回答防火墙），由 install.sh 在安装期拼接进各自命令。
 
 ## 多 supervisor 并存
 
@@ -173,9 +193,9 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 
 ## 常见问题
 
-- **绿地/重构拿不准用哪个**：有存量代码要改就用 `/rework`（考古+安全网前置）；从零开始用 `/supervisor`；产出是报告不是代码用 `/research`（问题定义+证据分级，不改产品代码）；一堆现成材料要提炼高层结构用 `/abstract`（覆盖对账+锚点抽查，输入面锁死）。
+- **绿地/重构/调研/提炼/审查拿不准用哪个**：有存量代码要改就用 `/rework`（考古+安全网前置）；从零开始用 `/supervisor`；产出是报告不是代码用 `/research`（问题定义+证据分级，不改产品代码）；一堆现成材料要提炼高层结构用 `/abstract`（覆盖对账+锚点抽查，输入面锁死）；已有产出要审用 `/adversarial`（独立视角隔离+交叉攻击+三态收敛）。
 - **worker 找不到 supervisor**：supervisor 终端执行 `/rename supervisor` 固定名字后 worker 重试；同时确认两边在预期目录。
-- **supervisor 行为漂移**（长会话被压缩后协议淡化）：重新执行对应模式的命令（`/supervisor`、`/rework`、`/research`、`/abstract`）重注入协议，state.json 会恢复全部上下文。
+- **supervisor 行为漂移**（长会话被压缩后协议淡化）：重新执行对应模式的命令（`/supervisor`、`/rework`、`/research`、`/abstract`、`/adversarial`）重注入协议，state.json 会恢复全部上下文。
 - **监工不是 100% 可靠（已知边界）**：监工人格来自 prompt 注入，遵循度无法确保。本套件的对冲：中断检测的触发（hook/watchdog）是硬代码不依赖监工自觉；进度全在 state.json 里，漂移可重注入恢复；软失效（漏巡检等）的后果被硬兜底层限制为"晚发现"而非"不发现"。详见 DESIGN.md 第 9 节。
 - **怀疑 hook 没生效**：跑 `bash test_stopfailure.sh`、`bash test_watchdog.sh` 和 `bash test_registry.sh` 回归（断言型沙箱测试，不碰真实数据）；真实中断后查 `.supervisor/<sid>/interrupts.jsonl`（`<sid>` 是该 supervisor 的 session_id；旧平铺布局在 `.supervisor/interrupts.jsonl`）有无新条目。
 - **想手动跑一次 watchdog**：`~/.claude/supervisor/supervisor-watchdog /path/to/repo 60`（项目目录 + 超时阈值分钟，默认 60）。
@@ -184,7 +204,7 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 ## 卸载
 
 ```bash
-rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/research.md ~/.claude/commands/abstract.md ~/.claude/commands/worker.md
+rm ~/.claude/commands/supervisor.md ~/.claude/commands/rework.md ~/.claude/commands/research.md ~/.claude/commands/abstract.md ~/.claude/commands/adversarial.md ~/.claude/commands/worker.md
 rm -rf ~/.claude/hooks/claude-supervisor
 rm -rf ~/.claude/supervisor
 # 并从 ~/.claude/settings.json 的 hooks.StopFailure / hooks.SessionStart /
@@ -193,4 +213,4 @@ rm -rf ~/.claude/supervisor
 
 ## 仓库结构
 
-核心协议 `commands/_core-supervisor.md` + 四个模式层（`commands/*.md`）+ 工人协议 `commands/worker.md`，安装期由 `install.sh` 拼接分发；四个 hook 与 `registry.py` 在 `hooks/`；watchdog 是根目录的 `watchdog.sh`；三个回归测试 `test_*.sh`；每轮迭代的 spec/plan 存档在 `specs/`（含设计决策与 CR 记录）；技术设计原理见 [DESIGN.md](DESIGN.md)。
+核心协议 `commands/_core-supervisor.md` + 五个模式层（`commands/*.md`）+ 工人协议 `commands/worker.md`，安装期由 `install.sh` 拼接分发；四个 hook 与 `registry.py` 在 `hooks/`；watchdog 是根目录的 `watchdog.sh`；三个回归测试 `test_*.sh`；每轮迭代的 spec/plan 存档在 `specs/`（含设计决策与 CR 记录）；技术设计原理见 [DESIGN.md](DESIGN.md)。
