@@ -212,13 +212,15 @@ try:
     # bounded wait, mirroring registry.py: a hung stale installer must not
     # block the next one forever (LOCK_EX alone blocks indefinitely).
     # 5s timeout, exit 4 — same contract as registry.py's write_txn.
-    import time
+    import time, errno
     deadline = time.monotonic() + 5.0
     while True:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
-        except OSError:
+        except OSError as e:
+            if e.errno not in (errno.EACCES, errno.EAGAIN):
+                raise  # programming error (EBADF etc.) must not spin 5s
             if time.monotonic() >= deadline:
                 print("  ERROR: could not acquire %s within 5s (another "
                       "installer holding the lock?). Retry after it exits, "
