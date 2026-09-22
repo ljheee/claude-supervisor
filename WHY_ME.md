@@ -16,7 +16,7 @@ This toolkit takes you off the night shift. One supervisor session manages N wor
 
 **Crashes resume, never restart.** All progress is persisted in sharded ledgers under `.supervisor/`. A worker crashes — open a new session, realign with the ledger, carry on. The supervisor itself crashes — resume, and it picks up the same way. "Months of work gone overnight" is not an outcome this design allows.
 
-## Four Modes, Each Blocking One Class of Trouble
+## Five Modes, Each Blocking One Class of Trouble
 
 Greenfield projects (`/supervisor`): the biggest risk of AI building from scratch is it misunderstanding the goal without you noticing — by the time you see the finished product, it's too late. The supervisor interrogates the goal into a spec and plan for your confirmation upfront, then reviews phase by phase; drift gets rejected on the spot. The supervisor acts as a course-corrector against the project goal. Your involvement shrinks to twenty minutes at the start plus a final acceptance.
 
@@ -25,6 +25,8 @@ Legacy rework (`/rework`): the scariest thing about AI touching old code is "con
 Research (`/research`): the biggest pitfall of AI doing research is confident hallucination. Evidence gets graded on five levels, the supervisor personally spot-checks and reproduces key evidence, and one fabrication re-opens the whole chapter. In the report you receive, every claim traces back to a source.
 
 Synthesis (`/abstract`): hand it a pile of material to summarize, and it either gives you "correct-sounding platitudes" or quietly pulls in extra material as it writes. The material inventory locks once finalized; coverage reconciliation guarantees every item is either explained by a proposition or explicitly marked as a counterexample; propositions that can't be falsified and have no use get demoted.
+
+Adversarial review (`/adversarial`): the biggest problem with AI reviewing PRs, designs, and research reports is that the reviewer isn't adversarial — findings go unchallenged, unread parts stay unaccounted for. Multiple independent sessions each hold one perspective and review blind; findings get anonymized, cross-attacked, then converged. Every finding carries an anchor and an evidence grade, and the supervisor spot-checks them. When a run ends with zero rebuttals, the supervisor must personally re-attack a sample of high-impact findings — adversarialness comes from the isolation structure, not from a couple of "think critically" lines in a prompt.
 
 ## Why You Can Trust It
 
