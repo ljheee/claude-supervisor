@@ -209,7 +209,23 @@ def same_command(a, b):
 lock_path = settings + ".lock"
 lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o644)
 try:
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    # bounded wait, mirroring registry.py: a hung stale installer must not
+    # block the next one forever (LOCK_EX alone blocks indefinitely).
+    # 5s timeout, exit 4 — same contract as registry.py's write_txn.
+    import time
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                print("  ERROR: could not acquire %s within 5s (another "
+                      "installer holding the lock?). Retry after it exits, "
+                      "or remove the stale lock holder." % lock_path,
+                      file=sys.stderr)
+                sys.exit(4)
+            time.sleep(0.1)
 
     cfg = None
     if os.path.exists(settings):

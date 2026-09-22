@@ -34,7 +34,8 @@ Supervisor resolution (never name-only):
   1. state.supervisor_session_id matches a live session -> use it
   2. state.supervisor_name matches AND the session's cwd equals
      state.project_dir -> use it (freshest by updatedAt).
-     DISABLED when more than one shard exists: a dead target must not
+     DISABLED as soon as ANY shard exists (n_shards >= 1, see case18b for
+     the exactly-one-shard upgrade window): a dead target must not
      fall through to a same-name stranger in the same directory.
   3. otherwise: no delivery; the interrupt is still persisted for catch-up.
 

@@ -176,8 +176,8 @@ spawn）；git rev-parse fallback 只在异常回合的 worktree 场景才付（
 `resolve_supervisor` 刻意不做 name fallback：sid 缺失时只落盘 interrupts.jsonl
 走 catch-up，不做活投递（name-only 命中恰是 v3 要防的误投向量）。连击计数在
 分片 `anomaly_state.json`（单写者原子写，绝不与 watchdog_state.json 共文件）；
-已知边界：读-改-写跨进程存在丢失更新窗口——两个 worker 同时异常时 streak 可能
-少数一次，后果仅是多抑制一回合（full 需连击 ≥2 的路径），可接受不修。
+已知边界：读-改-写跨进程存在丢失更新窗口——worker A 的异常 bump 与 worker B 的健康回合 GC/reset 并发时会互相覆盖（B 的 save 抹掉 A 刚 bump 的 streak），两个 worker 同时异常时 streak 也可能
+少数一次；两种形态后果相同，仅是多抑制一回合（full 需连击 ≥2 的路径），可接受不修。
 
 ### 5.1 身份判定
 
@@ -280,7 +280,7 @@ supervisor 收到 WORKER INTERRUPTED 后：
 
 ## 10. 测试策略
 
-`test_stopfailure.sh`（65 项断言）、`test_watchdog.sh`（32 项断言）与 `test_registry.sh`（29 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端；registry 测试经 CLAUDE_SUPERVISOR_DIR 环境变量钉到临时目录），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
+`test_stopfailure.sh`（83 项断言）、`test_watchdog.sh`（50 项断言）与 `test_registry.sh`（29 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端；registry 测试经 CLAUDE_SUPERVISOR_DIR 环境变量钉到临时目录；watchdog 测试默认取安装版路径、可用 $1 指向仓库版），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
 
 - hook：正常投递（auth+user 帧、kind 分类、phase、session_id 落账）、陌生人会话/空 workers/done 项目/无 state 目录的零误伤、子目录 cwd 向上寻址、socket 存在但拒连（真 connect 失败分支）、key 缺失的 auth 降级、畸形 stdin、非字符串 error_details、同名 supervisor 诱饵不被选中；v3 增量：多分片定向投递/零命中与双命中歧义不投递、平铺回退与升级窗口（case18b：1 分片 + v2 平铺共存时 pass-2 禁用不错投）、worktree 发现、archive 不可见、分片守卫（拦 registry 直写/错 sid deny/短路放行）、身份注入器（startup/resume/垃圾静默）；
 - watchdog：逾期告警（含 session_id）、同静默级别去重、`last_instruction_ts` 不抑制告警（case C 独立断言）、新鲜 worker/最近响应/done 项目静默、非法阈值/目录/损坏 state/workers 非列表的静默退出、梯度升级再触发（case O）、恢复后梯度重置（case P：basis 快照变更即新静默周期）、RFC3339 Z 时间戳解析；v3 增量：分片遍历与平铺回退、多分片独立告警与去重互不干扰、UDS 直投按 supervisor_session_id 定向、archive 不可见；

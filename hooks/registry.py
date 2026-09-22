@@ -13,6 +13,9 @@ Protocol contract (spec F1):
                     -> print their list, exit 2, write NOTHING
                   name collision with another ACTIVE entry
                     -> print explanation, exit 3, write NOTHING
+                  ("write NOTHING" is literal: rejection paths return
+                   None to write_txn, which skips the tmp+replace
+                   entirely — no rewrite, no mtime bump.)
                   --isolation-confirmed re-reads and verifies the set of
                   OTHER active entries has not GROWN, then writes.
                 Upsert refreshes name and clears the entry's own stale
@@ -156,6 +159,7 @@ def read_registry(registry_path):
 
 def cmd_register(args, registry_path):
     my_sid = args.session_id
+    _reject_kind = [None]  # side-channel: which rejection fired in txn
 
     def txn(supervisors, confirmed=False):
         others = active_others(supervisors, my_sid)
@@ -166,10 +170,11 @@ def cmd_register(args, registry_path):
         # name uniqueness assertion (SendMessage routes by name only)
         for s in others:
             if s.get("name") == args.name:
+                _reject_kind[0] = "name-collision"
                 print("NAME COLLISION: active supervisor sid=%s already uses "
                       "name '%s'. /rename to a unique name first."
                       % (s.get("session_id")[:8], args.name))
-                return "name-collision"
+                return None  # None = write NOTHING (rejection path)
         if others and not confirmed and not mine:
             print("ACTIVE SUPERVISORS in this project:")
             for s in others:
@@ -178,7 +183,8 @@ def cmd_register(args, registry_path):
             print("Re-run with --isolation-confirmed --known-others '<the "
                   "KNOWN_OTHERS array above>' after the user has confirmed "
                   "branch/worktree isolation.")
-            return "need-confirm"
+            _reject_kind[0] = "need-confirm"
+            return None  # None = write NOTHING (rejection path)
         if confirmed:
             # verify the other-active set has not GROWN since first attempt
             try:
@@ -194,7 +200,8 @@ def cmd_register(args, registry_path):
                 for s in grown:
                     print(entry_line(s))
                 print(known_others_line(others))
-                return "grown"
+                _reject_kind[0] = "grown"
+                return None  # None = write NOTHING (rejection path)
         # idempotent upsert keyed by sid: field-level merge (unspecified
         # args keep their existing values; name/stale/heartbeat refresh)
         updated = False
@@ -237,12 +244,10 @@ def cmd_register(args, registry_path):
                       lambda sup: txn(sup, confirmed=True))
     else:
         r = write_txn(registry_path, lambda sup: txn(sup))
-    if r == "need-confirm":
-        sys.exit(2)
-    if r == "name-collision":
-        sys.exit(3)
-    if r == "grown":
-        sys.exit(2)
+    if r is None:
+        # rejection (message already printed, registry untouched): exit code
+        # via side-channel flag — need-confirm/grown -> 2, name-collision -> 3
+        sys.exit(2 if _reject_kind[0] in ("need-confirm", "grown") else 3)
     print("registered: %s (sid=%s)" % (args.name, my_sid))
 
 
@@ -325,7 +330,8 @@ def cmd_list(registry_path):
 
 
 def main():
-    # env override for testing (install path: ~/.claude/supervisor/registry.py)
+    # env override for testing (points at the directory holding registry.json,
+    # i.e. <project-dir>/.supervisor — not the ~/.claude/supervisor install dir)
     base = os.environ.get("CLAUDE_SUPERVISOR_DIR")
     if base:
         default_registry = os.path.join(base, "registry.json")

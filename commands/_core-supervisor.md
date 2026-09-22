@@ -10,13 +10,13 @@
 1. 解析参数：第一个非选项参数是**项目目标**；若有 `--project-dir`，那是被监工的仓库路径（默认当前目录）。启动时若 `<project-dir>/.supervisor/` 不在 .gitignore 中，提醒用户把 `.supervisor/` 加入 .gitignore（监工账本不应进 git，避免 worker commit 裹挟且多 worker 间无谓冲突），并**主动询问是否代为追加一行**——用户点头即做（追加 `.supervisor/` 到 .gitignore，已有则不重复），不要只提醒不跟进（实测首跑用户未处理即全程裸奔）。
 2. 确认你自己的会话名与 session_id。**sid 首选 SessionStart 注入行**：本套件安装后每个会话开局被注入一行 `SESSION_ID <uuid> <source>`——直接取该行 UUID 作为你的 session_id。无注入行（未安装 hook 等）时 fallback：扫 `~/.claude/sessions/` 注册表，**匹配规则：name 相等且 cwd==project-dir**；仍多条（同名同目录）→ 报错并请用户 `/rename` 换名后重扫，禁止任选（选错 = 分片键错，hook 寻址永远 miss）。⚠️ 合法 session_id 是 36 位 UUID（形如 `d427b304-d742-42d2-bacc-470ec7d1475f`）；ListAgents 输出名字后的方括号短哈希**不是** session_id（当前版本 ListAgents 也不输出 UUID，不能作为 sid 来源）。**会话名固定**：若你是自动分配名（含 "test-" 等随机形态）或与已知名冲突，建议用户 `/rename supervisor-<模式或短后缀>`——会话名是消息路由键（SendMessage 只认名称，实测确认），多 supervisor 并存时必须唯一。
    **resume 恢复流程**（检测到本 sid 的分片已存在即视为 resume 场景；resume 会重分配会话名但保 sid）：先读 registry 本方条目与他人活跃条目——旧名未被占用才 `/rename` 回旧名，被占用则直接选新唯一名；随即执行注册命令 upsert 刷新 name（并自愈本方 stale 标记）；然后向用户汇报中断点继续。期间 worker 若按旧名寻址失败，会走死条目报告路径由用户引导（恢复流程收尾后自动重新可达）。
-3. **旧布局迁移**：检测到平铺 `<project-dir>/.supervisor/state.json`（v2/rework 遗留）→ 询问用户：归档（推荐，`mv` 为 `.supervisor/archive/<started_at>-<旧 goal 摘要>/`，目录名中 `/` 与空格替换为 `-`）或保留原地不动（本 supervisor 新建分片与旧账并存，旧账不再读写）。用户未答前不创建分片。旧账有未完结轮次（done:false 且 workers 非空）时警告用户：v3 supervisor 启动后 hook/watchdog 以分片优先，建议先让旧轮次收尾或归档。
+3. **旧布局迁移**：检测到平铺 `<project-dir>/.supervisor/state.json`（v2/rework 遗留）→ 询问用户：归档（推荐，`mv` 为 `.supervisor/archive/<started_at>-<旧 goal 摘要>/`，目录名中 `/` 与空格替换为 `-`；v2 平铺账本无 `started_at` 字段时，用 state.json 的 mtime（`stat -f %Sm -t "%Y%m%d-%H%M%S" <state.json>`）作时间前缀）或保留原地不动（本 supervisor 新建分片与旧账并存，旧账不再读写）。用户未答前不创建分片。旧账有未完结轮次（done:false 且 workers 非空）时警告用户：v3 supervisor 启动后 hook/watchdog 以分片优先，建议先让旧轮次收尾或归档。
 4. **registry 注册与并行隔离断言**：执行 `~/.claude/supervisor/registry.py register --session-id <你的sid> --name <你的会话名> --mode <greenfield|rework|research|abstract> --goal <目标摘要≤60字> --project-dir <project-dir> [--branch <本方分支>]`——exit 0 即成功（按 sid 幂等 upsert，resume 重走启动不产生重复条目）；exit 2（存在他人活跃条目，输出列表）→ 把列表展示给用户，确认本方工作分支/worktree 与他方不冲突后，带 `--isolation-confirmed --known-others '<首次输出末尾 KNOWN_OTHERS 行的完整 sid JSON 数组>'` 重试（脚本会重读校验他人活跃集合未新增）；exit 3（与他人撞名）→ 请用户先 `/rename` 唯一名再注册；exit 4（锁超时）→ 向用户 ESCALATE；其他非零（exit 1，用法/入参错误）→ 检查命令拼写与参数后重试一次，仍失败则 ESCALATE。未获用户确认或用户叫停 → ESCALATE，**不写入条目、不建分片、不建 cron**（不留孤儿产物）。**绝不直接编辑 registry.json**——它是多写者文件，写操作必须全部经 registry.py。
 5. 读取/创建你的分片账本 `<project-dir>/.supervisor/<你的 session_id>/state.json`（分片目录随建，schema 见下）。若已存在（resume），先向用户汇报当前进度再继续。**state.json 必须立即写入 `supervisor_name` 与 `supervisor_session_id`**（第 2 步获取）——StopFailure hook 和 watchdog 靠它们寻址你。
 6. **不要主动向疑似 worker 发消息**（避免误伤无关会话）：优先等待 `WORKER REGISTER` 主动注册；若 1 分钟内无注册到达，向用户报告当前可达会话列表并请用户确认哪些是本项目 worker。
-7. **创建定时自巡检 cron（把第三层防御从"被动唤醒"升级为"定时醒来"）**：先 `CronList` 查重——已存在 prompt 含 "监工定时巡检(<你的完整 sid>)" 标识的任务则跳过创建（幂等，防协议重注入产生双 cron；标识含完整 UUID，多 supervisor 并存时不会误吞对方的巡检任务）；不存在时用 `CronCreate` 创建（cron='*/10 * * * *'，recurring=true，**不传 durable**——默认 session-only，durable 会被同目录其他会话接管执行，巡检必须只属于你自己），prompt 为：
+7. **创建定时自巡检 cron（把第三层防御从"被动唤醒"升级为"定时醒来"）**：先 `CronList` 查重——已存在 prompt 含 "监工定时巡检（<你的完整 sid>）" 标识的任务则跳过创建（幂等，防协议重注入产生双 cron；标识含完整 UUID，多 supervisor 并存时不会误吞对方的巡检任务）；不存在时用 `CronCreate` 创建（cron='*/10 * * * *'，recurring=true，**不传 durable**——默认 session-only，durable 会被同目录其他会话接管执行，巡检必须只属于你自己），prompt 为：
    ```
-   监工定时巡检（持久例行动作，无 CronDelete 收尾指令则每轮照常执行，勿停）：
+   监工定时巡检（<你的完整 sid>；持久例行动作，无 CronDelete 收尾指令则每轮照常执行，勿停）：
    1) 读 <project-dir>/.supervisor/registry.json 本方条目自检：name 与自身当前会话名不符 / stale=true / 条目缺失 → 立即走启动步骤 2 的 resume 恢复流程；
    2) CronList 自查：本巡检任务若已消失（自动过期）则立即按启动步骤第 7 步重建（查重标识用自己的完整 sid），这是例行动作不是异常；
    3) 执行"中断与失联处理"第三层的巡检三步（失联判定 / pending_check 结算 / 中断补课）；
@@ -30,11 +30,11 @@
    crontab -l 2>/dev/null | grep -qF "$MARK" || \
      { TMPF=$(mktemp); crontab -l 2>/dev/null > "$TMPF"; \
        echo "$MARK" >> "$TMPF"; \
-       echo "*/10 * * * * ~/.claude/supervisor/supervisor-watchdog '<project-dir>' 60" >> "$TMPF"; \
+       echo "*/10 * * * * ~/.claude/supervisor/supervisor-watchdog '<project-dir>' <watchdog-阈值分钟>" >> "$TMPF"; \
        crontab "$TMPF"; rm -f "$TMPF"; }
    ```
-   两处 `<project-dir>` 一致替换为被监工仓库的**绝对路径**（路径含空格时保持单引号包裹）。resume 重走启动时查重命中即跳过（残留条目复用，收尾语义见状态机 dev-N 第 4 步注记）。
-8. 收到 WORKER REGISTER 后，解析其中的**自报 session_id**（worker 开局从 SessionStart 注入行获得，消息内自带；⚠️ 必须是完整 36 位 UUID），校验后**再做一次交叉验证**：扫 `~/.claude/sessions/` 注册表按发送方 name 且 cwd==project-dir 匹配，与自报不一致以扫描为准并要求 worker 重报；扫描零命中且无自报 → 非 Claude worker（Codex 等 agent-mail 桥），session_id 记 null、`channel` 记 `"agent-mail"`。验证通过后连同名字写入 workers[]（见下方身份主键规则），然后发送**初始指令**，消息必须包含：
+   两处 `<project-dir>` 一致替换为被监工仓库的**绝对路径**（路径含空格时保持单引号包裹）。`<watchdog-阈值分钟>` 是失联告警阈值（分钟）：绿地模式（core 默认 60 分钟失联时限）填 60；rework/research/abstract/adversarial 模式（与 worker 约定 120 分钟长 phase 失联时限）填 120——阈值应与本模式与 worker 约定的失联时限一致或稍长，避免长 phase 中段的假告警。resume 重走启动时查重命中即跳过（残留条目复用，收尾语义见状态机 dev-N 第 4 步注记）。
+8. 收到 WORKER REGISTER 后，解析其中的**自报 session_id**（worker 开局从 SessionStart 注入行获得，消息内自带；⚠️ 必须是完整 36 位 UUID），校验后**再做一次交叉验证**：扫 `~/.claude/sessions/` 注册表按发送方 name 且 cwd==project-dir 匹配，与自报不一致以扫描为准并要求 worker 重报；扫描零命中且无自报 → 非 Claude worker（Codex 等 agent-mail 桥），session_id 记 null、`channel` 记 `"agent-mail"`；扫描多条命中（同名同目录多会话，与步骤 2 supervisor 侧对称）→ 按扫描结果的 `updatedAt` 取最新一条，并要求该 worker `/rename` 换唯一名后重报，禁在多条命中时直接任选。验证通过后连同名字写入 workers[]（见下方身份主键规则），然后发送**初始指令**，消息必须包含：
    - 项目目标（goal 原文）与该 worker 的 scope（单 worker 为 all）
    - 上报协议格式（WORKER REPORT 模板，见下方内联模板）
    - WORKER STATUS 响应模板（见下方）

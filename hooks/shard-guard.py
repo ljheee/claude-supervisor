@@ -68,6 +68,11 @@ def main():
     if not isinstance(ti, dict):
         return
     fp = ti.get("file_path")
+    if not isinstance(fp, str) or not fp:
+        # NotebookEdit carries its path as notebook_path, not file_path:
+        # fall through so the guard can still judge it (a .supervisor/
+        # notebook is nonsense, but the path must not pass silently)
+        fp = ti.get("notebook_path")
     if not isinstance(fp, str) or not fp or ".supervisor/" not in fp.lower():
         return
 
@@ -79,11 +84,14 @@ def main():
     rest = fp[idx + len(".supervisor/"):]
     head = rest.split("/")[0]
 
-    # rule 2: registry.json direct write -> always denied
-    if head.lower() == "registry.json":
-        deny(".supervisor/registry.json 是多写者核心文件（fcntl 并发锁在"
+    # rule 2: registry.json direct write -> always denied. The lock file
+    # registry.json.lock is equally protected: Write tool's internal
+    # tmp+rename would swap its inode and silently defeat the fcntl flock
+    # held by registry.py / install.sh (same concurrency-safety class).
+    if head.lower() in ("registry.json", "registry.json.lock"):
+        deny(".supervisor/%s 是多写者核心文件（fcntl 并发锁在"
              " ~/.claude/supervisor/registry.py 内）——Write/Edit 直编会击穿并发安全。"
-             "合法写操作一律经 registry.py 子命令（Bash 调用）。")
+             "合法写操作一律经 registry.py 子命令（Bash 调用）。" % head)
 
     # rule 1: shard write -> path uuid must equal this session's session_id
     if UUID_RE.fullmatch(head):

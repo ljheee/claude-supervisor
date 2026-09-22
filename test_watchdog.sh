@@ -214,7 +214,9 @@ assert_contains "K: RFC3339 Z timestamp parsed -> alert" "$SPOOL" "sid-w3"
 # seeded: last alert at silence 70min, basis == current basis (worker ts
 # unchanged since) -> no ladder reset; silence now 120 >= 70+50 -> re-alert
 rm -f "$SPOOL" "$PROJ/.supervisor/watchdog_state.json"
-OLD70=$(python3 -c "import datetime;print((datetime.datetime.now()-datetime.timedelta(minutes=120)).isoformat())")
+OLD70=$OLD   # 种子 basis 必须与 worker basis 逐字相同（$OLD 是同一字符串实例），
+              # 否则两次 python3 调用微秒必不同 → basis 不匹配 → 误走 ladder-reset
+              # 路径，同 basis 梯度分支（m >= prev+T）零覆盖
 python3 - "$PROJ/.supervisor/watchdog_state.json" "$OLD70" <<'EOF'
 import json, sys
 path, basis = sys.argv[1], sys.argv[2]
