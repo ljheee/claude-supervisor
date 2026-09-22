@@ -19,7 +19,7 @@ Five modes are supported:
 - **Abstract** (`/abstract`, synthesis — distills the high-level propositions that govern a pile of existing material).
 - **Adversarial review** (`/adversarial`, review existing output — PR diffs / design docs / research reports — with multiple isolated perspectives, anonymous cross-attack, and a convergent report).
 
-It's a combination of hard-coded safety nets plus a prompt protocol: interruption detection, shard guards, and external watch never depend on the model's own diligence — if the model degrades, the safety nets keep working (worst case shrinks from "never noticed" to "noticed a bit late"). Full motivation and design origins: [WHY_ME.md](WHY_ME.md); design principles, reverse-engineering notes, and the interruption model: [DESIGN.md](DESIGN.md).
+It's a combination of hard-coded safety nets plus a prompt protocol: interruption detection, shard guards, and external watch never depend on the model's own diligence — if the model degrades, the safety nets keep working (worst case shrinks from "never noticed" to "noticed a bit late"). Full motivation and design origins: [WHY_ME.md](WHY_ME.md); design principles, reverse-engineering notes, and the interruption model: [DESIGN.md](DESIGN.md) ([中文](DESIGN-zh.md)).
 
 ## Installation
 
