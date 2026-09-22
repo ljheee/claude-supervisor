@@ -171,7 +171,7 @@ What if nobody is watching — does anything go wrong? Three keep-alive mechanis
 2. **The watchdog watches everyone from the system crontab** (auto-registered at startup, auto-removed at wrap-up): a silent worker past the threshold alerts the supervisor directly; the supervisor's own heartbeat going stale pops a desktop notification to you (with `claude --resume` recovery guidance) — the checker is independent of the checked party's session, so it still fires when the supervisor is dead. Alerts carry gradient de-duplication and never spam.
 3. **Everything is on disk**: state, interruption records, and acknowledgments all live under `.supervisor/`; crashed sessions don't lose the ledger, recovery realigns and continues.
 
-Known edge: when the supervisor is stuck in an over-threshold long turn (e.g., running the full test suite itself), the watchdog produces one false DEGRADED (de-duplication caps it at once — ignorable). Mechanism details in DESIGN.md.
+Known edge: when the supervisor is stuck in an over-threshold long turn (e.g., running the full test suite itself), the watchdog produces one false DEGRADED (de-duplication caps it at once — ignorable). Mechanism details in DESIGN.md section 6.
 
 Prerequisite: add `.supervisor/` to the project's `.gitignore` (the supervisor proactively asks to append it at startup and does it on your nod — it never just reminds and moves on).
 
@@ -223,4 +223,4 @@ rm -rf ~/.claude/supervisor
 
 ## Repository Layout
 
-The core protocol `commands/_core-supervisor.md` + five mode layers (`commands/*.md`) + the worker protocol `commands/worker.md`, spliced and distributed by `install.sh` at install time; the four hooks and `registry.py` live in `hooks/`; the watchdog is `watchdog.sh` at the repo root; three regression tests `test_*.sh`; each iteration's spec/plan archives in `specs/` (with design decisions and CR records); technical design principles in [DESIGN.md](DESIGN.md).
+The core protocol `commands/_core-supervisor.md` + five mode layers (`commands/*.md`) + the worker protocol `commands/worker.md`, spliced and distributed by `install.sh` at install time; the four hooks and `registry.py` live in `hooks/`; the watchdog is `watchdog.sh` at the repo root; three regression tests `test_*.sh`; each iteration's spec/plan archives in `specs/` (with design decisions and CR records); technical design principles in [DESIGN.md](DESIGN.md) ([中文](DESIGN-zh.md)).

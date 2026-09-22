@@ -19,7 +19,7 @@
 - **abstract 模式**（`/abstract`，抽象提炼——从一堆现成材料提炼支配它们的高层命题）。
 - **对抗审查模式**（`/adversarial`，审查已有产出——PR diff / 方案文档 / 调研报告：多路独立视角 + 匿名交叉攻击 + 收敛报告）。
 
-它是硬代码兜底 + prompt 协议的组合：中断检测、分片守卫、外部盯梢不依赖模型自觉，模型劣化了兜底照常工作（最坏后果从"不发现"压缩为"稍晚发现"）。完整动机与设计出处见 [WHY_ME-zh.md](WHY_ME-zh.md)；设计原理、逆向依据、中断模型见 [DESIGN.md](DESIGN.md)。
+它是硬代码兜底 + prompt 协议的组合：中断检测、分片守卫、外部盯梢不依赖模型自觉，模型劣化了兜底照常工作（最坏后果从"不发现"压缩为"稍晚发现"）。完整动机与设计出处见 [WHY_ME-zh.md](WHY_ME-zh.md)；设计原理、逆向依据、中断模型见 [DESIGN-zh.md](DESIGN-zh.md)（[English](DESIGN.md)）。
 
 ## 安装
 
@@ -162,7 +162,7 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 2. **watchdog 在系统 crontab 里盯所有人**（启动协议自动注册、收尾自动移除）：worker 静默超时，告警直投监工；监工自己心跳停更，弹桌面通知找你（附 `claude --resume` 恢复指引）——检查者独立于被检查者的会话，监工死了它照样响。告警带梯度去重，不刷屏。
 3. **账本全落盘**：状态、中断流水、确认记录都在 `.supervisor/` 下，会话崩溃不丢账，恢复后对齐接着干。
 
-已知边界：监工陷在超过阈值的超长回合（如自己跑全量测试）时，watchdog 会产生一次假 DEGRADED（去重保证只此一次，可忽略）。机制细节见 DESIGN.md。
+已知边界：监工陷在超过阈值的超长回合（如自己跑全量测试）时，watchdog 会产生一次假 DEGRADED（去重保证只此一次，可忽略）。机制细节见 DESIGN-zh.md。
 
 前提：项目 `.gitignore` 加 `.supervisor/`（supervisor 启动时会主动询问是否代为追加，用户点头即做——不会只提醒不跟进）。
 
@@ -196,7 +196,7 @@ clarify（需求澄清，问题经 supervisor 汇总转达给你）
 - **绿地/重构/调研/提炼/审查拿不准用哪个**：有存量代码要改就用 `/rework`（考古+安全网前置）；从零开始用 `/supervisor`；产出是报告不是代码用 `/research`（问题定义+证据分级，不改产品代码）；一堆现成材料要提炼高层结构用 `/abstract`（覆盖对账+锚点抽查，输入面锁死）；已有产出要审用 `/adversarial`（独立视角隔离+交叉攻击+三态收敛）。
 - **worker 找不到 supervisor**：supervisor 终端执行 `/rename supervisor` 固定名字后 worker 重试；同时确认两边在预期目录。
 - **supervisor 行为漂移**（长会话被压缩后协议淡化）：重新执行对应模式的命令（`/supervisor`、`/rework`、`/research`、`/abstract`、`/adversarial`）重注入协议，state.json 会恢复全部上下文。
-- **监工不是 100% 可靠（已知边界）**：监工人格来自 prompt 注入，遵循度无法确保。本套件的对冲：中断检测的触发（hook/watchdog）是硬代码不依赖监工自觉；进度全在 state.json 里，漂移可重注入恢复；软失效（漏巡检等）的后果被硬兜底层限制为"晚发现"而非"不发现"。详见 DESIGN.md 第 9 节。
+- **监工不是 100% 可靠（已知边界）**：监工人格来自 prompt 注入，遵循度无法确保。本套件的对冲：中断检测的触发（hook/watchdog）是硬代码不依赖监工自觉；进度全在 state.json 里，漂移可重注入恢复；软失效（漏巡检等）的后果被硬兜底层限制为"晚发现"而非"不发现"。详见 DESIGN-zh.md 第 9 节。
 - **怀疑 hook 没生效**：跑 `bash test_stopfailure.sh`、`bash test_watchdog.sh` 和 `bash test_registry.sh` 回归（断言型沙箱测试，不碰真实数据）；真实中断后查 `.supervisor/<sid>/interrupts.jsonl`（`<sid>` 是该 supervisor 的 session_id；旧平铺布局在 `.supervisor/interrupts.jsonl`）有无新条目。
 - **想手动跑一次 watchdog**：`~/.claude/supervisor/supervisor-watchdog /path/to/repo 60`（项目目录 + 超时阈值分钟，默认 60）。
 - **想跨 Codex 用**：本套件的消息通道是 Claude↔Claude 官方机制；Codex worker 可改用 agent-mail 桥上报（两套件互补）。
@@ -213,4 +213,4 @@ rm -rf ~/.claude/supervisor
 
 ## 仓库结构
 
-核心协议 `commands/_core-supervisor.md` + 五个模式层（`commands/*.md`）+ 工人协议 `commands/worker.md`，安装期由 `install.sh` 拼接分发；四个 hook 与 `registry.py` 在 `hooks/`；watchdog 是根目录的 `watchdog.sh`；三个回归测试 `test_*.sh`；每轮迭代的 spec/plan 存档在 `specs/`（含设计决策与 CR 记录）；技术设计原理见 [DESIGN.md](DESIGN.md)。
+核心协议 `commands/_core-supervisor.md` + 五个模式层（`commands/*.md`）+ 工人协议 `commands/worker.md`，安装期由 `install.sh` 拼接分发；四个 hook 与 `registry.py` 在 `hooks/`；watchdog 是根目录的 `watchdog.sh`；三个回归测试 `test_*.sh`；每轮迭代的 spec/plan 存档在 `specs/`（含设计决策与 CR 记录）；技术设计原理见 [DESIGN-zh.md](DESIGN-zh.md)（[English](DESIGN.md)）。

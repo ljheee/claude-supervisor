@@ -1,51 +1,53 @@
-# claude-supervisor 技术设计原理
+# claude-supervisor — Technical Design Principles
 
-本文档记录 claude-supervisor 的设计依据、逆向考古结论、中断模型与各机制的原理。使用方法见 [README.md](README.md)。
+[中文](DESIGN-zh.md) | English (this file)
 
-## 1. 问题定义
+This document records the design rationale, reverse-engineering findings, interruption model, and the principles behind each mechanism of claude-supervisor. For usage, see [README.md](README.md).
 
-Claude Code 的多个会话之间天然隔离：任务要点、进度、context 各自为政。当用户用多个会话并行推进同一个项目时，缺少三样东西：
+## 1. Problem Definition
 
-1. **全局视角**——谁在干什么、进行到哪；
-2. **督促与审查**——worker 产出后有人把关，而不是干完才发现方向错；
-3. **故障韧性**——worker 因限流/网络/进程问题中断后，项目不会无限期静默死亡。
+Claude Code sessions are naturally isolated: task context, progress, and conversation state each live in their own world. When a user runs multiple sessions in parallel on the same project, three things are missing:
 
-claude-supervisor 用一个专门的 Supervisor 会话 + 官方跨会话消息机制 + 状态账本解决前两条，用五层防御解决第三条（v2 为四层，v3 起 watchdog 升为第五层）。
+1. **A global view** — who is doing what, and how far along;
+2. **Supervision and review** — someone gates worker output, instead of discovering a wrong direction only after everything is done;
+3. **Fault resilience** — after a worker is interrupted by rate limits / network / process issues, the project doesn't die silently forever.
 
-## 2. 底层能力考古（逆向 2.1.259 二进制所得）
+claude-supervisor solves the first two with a dedicated Supervisor session + the official cross-session messaging mechanism + a state ledger, and the third with a five-layer defense (four layers in v2; the watchdog became the fifth layer in v3).
 
-本节是设计的事实依据，均来自对 `~/.local/share/claude/versions/2.1.259`（191MB Mach-O）的 strings/上下文逆向，**官方无文档，升级版本后需重新验证**。
+## 2. Underlying Capability Archaeology (reverse-engineered from the 2.1.259 binary)
 
-### 2.1 会话注册表与凭据发布
+This section is the factual basis of the design. Everything here comes from strings/contextual reverse-engineering of `~/.local/share/claude/versions/2.1.259` (191MB Mach-O). **No official documentation exists; re-verify after version upgrades.**
 
-`~/.claude/sessions/<pid>.json` 是运行中会话的注册表，关键字段：
+### 2.1 Session registry and credential publishing
+
+`~/.claude/sessions/<pid>.json` is the registry of running sessions. Key fields:
 
 ```json
 {
   "pid": 80446,
   "sessionId": "169ac824-...",
   "cwd": "/path/to/project",
-  "name": "supervisor",           // /rename 固定，或自动派生
-  "messagingSocketPath": "/tmp/cc-socks/80446.sock",  // UDS 消息通道
+  "name": "supervisor",           // fixed via /rename, or auto-derived
+  "messagingSocketPath": "/tmp/cc-socks/80446.sock",  // UDS message channel
   "peerProtocol": 1,
   "peerFeatures": ["notify_idle", "reply_across_default_dirs", "artifact_yield"],
   "procStart": "Fri Sep  4 15:18:49 2026"
 }
 ```
 
-同目录的 `<pid>.<hash>.key` 是官方"发布"的入站凭据：
+The `<pid>.<hash>.key` file in the same directory is the officially "published" inbound credential:
 
 ```json
 {"peerToken": "12c635aa38def87395898c6aea77c1ba", "procStart": "Fri Sep  4 15:18:49 2026"}
 ```
 
-二进制中的证据：`[uds-messaging] Failed to publish the inbox auth key; peers will send unauthenticated (accepted: auth is optional on this platform)`——auth key 会被发布给 peers，且**本平台（macOS）auth 是可选的**（token 校验失败仍接受投递，这降低了本套件对 key 文件可用性的依赖，也意味着 token 匹配是尽力而为而非硬门槛）。
+Evidence in the binary: `[uds-messaging] Failed to publish the inbox auth key; peers will send unauthenticated (accepted: auth is optional on this platform)` — the auth key is published to peers, and **on this platform (macOS) auth is optional** (delivery is accepted even when token validation fails, which lowers the suite's dependence on key-file availability and means token matching is best-effort, not a hard gate).
 
-### 2.2 跨会话消息（ListAgents / SendMessage / 帧）
+### 2.2 Cross-session messaging (ListAgents / SendMessage / frames)
 
-- `ListAgents`（内部名 ListPeers）：列出 subagent / teammates / 本机会话 / 云会话。
-- `SendMessage`：按会话名或 `uds://`/`bridge://` 地址寻址投递。
-- 外部进程注入姿势（二进制中的官方提示原文）：
+- `ListAgents` (internal name ListPeers): lists subagents / teammates / local sessions / cloud sessions.
+- `SendMessage`: delivery addressed by session name or `uds://`/`bridge://` address.
+- External-process injection (official hint verbatim from the binary):
 
 ```bash
 { echo '{"type":"auth","token":"'"$CLAUDE_CODE_MESSAGING_TOKEN"'"}';
@@ -53,11 +55,11 @@ claude-supervisor 用一个专门的 Supervisor 会话 + 官方跨会话消息�
 | socat - UNIX-CONNECT:$CLAUDE_CODE_MESSAGING_SOCKET
 ```
 
-帧协议：顶层 `type` ∈ {auth, user, control}；user 帧的 message 就是标准的 role/content 结构，投递到目标会话后表现为一条用户消息。
+Frame protocol: top-level `type` ∈ {auth, user, control}; a user frame's message is the standard role/content structure, delivered to the target session as a user message.
 
-### 2.3 hook 事件全集（与本套件相关的部分）
+### 2.3 The hook event set (parts relevant to this suite)
 
-从二进制事件常量表逆向出的完整列表：
+Full list reverse-engineered from the binary's event constant table:
 
 ```
 PreToolUse, PostToolUse, PostToolUseFailure, PostToolBatch, Notification,
@@ -69,315 +71,306 @@ ElicitationResult, ConfigChange, WorktreeCreate, WorktreeRemove,
 InstructionsLoaded, CwdChanged, FileChanged, DirectoryAdded, MessageDisplay
 ```
 
-关键事件：
+Key events:
 
-- **`StopFailure`**（2.1.259 存在）：turn 以失败结束（429 耗尽重试、网络错误、API 错误）时触发。stdin schema：`{hook_event_name, session_id, transcript_path, cwd, prompt_id, error, error_details, last_assistant_message}`。配套执行器 `executeStopFailureHooks`。**这是中断防御第一层的根基。**
-- `PostToolUseFailure`：单个工具调用失败后触发（粒度太细，且 429 发生在模型回合层而非工具层，不适用本场景）。
-- `Stop`：turn 正常结束。不能用于中断检测——它恰恰在失败时不触发。
-- `notify_when_idle`（control 帧 `peer_idle_notice`）：turn 结束的信号性通知。**不能作为中断检测**：错误结束的 turn 是否发 notice 未经验证；即便发，也只表达"停了"不携带原因；进程死亡时主体消失什么都发不出。**v2 起的新用法**：作为 worker 活性信号刷新 `last_response_ts`（idle ≠ 完成，不作督促触发器）。订阅机制已实测可用（2026-09-05 端到端实测记录①，见 9.8）；若未来版本机制变更失效，本用法整体回退，不影响其余条款。
+- **`StopFailure`** (exists in 2.1.259): fires when a turn ends in failure (429 retry exhaustion, network error, API error). stdin schema: `{hook_event_name, session_id, transcript_path, cwd, prompt_id, error, error_details, last_assistant_message}`. Companion executor `executeStopFailureHooks`. **This is the foundation of the first layer of interruption defense.**
+- `PostToolUseFailure`: fires after a single tool call fails (too fine-grained; 429 happens at the model-turn level, not the tool level — not applicable here).
+- `Stop`: a turn ends normally. Cannot be used for interruption detection — it fires precisely when nothing failed.
+- `notify_when_idle` (control frame `peer_idle_notice`): a signal notification that a turn ended. **Cannot serve as interruption detection**: whether a failed turn still emits the notice is unverified; even if it does, it only says "stopped" without a reason; and when the process dies, the subject is gone and nothing can be sent. **New use since v2**: as a worker liveness signal refreshing `last_response_ts` (idle ≠ done; never a prompting trigger). The subscription mechanism is verified working (2026-09-05 end-to-end record ①, see §9.8); if a future version changes the mechanism, this usage is rolled back wholesale without affecting other clauses.
 
-### 2.4 明确不用的机制及原因
+### 2.4 Mechanisms deliberately not used, and why
 
-- **notify_when_idle（v1 结论，v2 部分反转）**：不用作中断检测或完成信号（信号太弱、覆盖不全，见 2.3），且 worker 协议已强制每个里程碑主动上报，订阅完成信号属于冗余。v2 起仅用作活性信号（刷新 last_response_ts，见第 11 节），仍不作督促触发器——按 idle 督促会按回合频率轰炸正在干活的 worker（长 Phase 中间每回合都 idle）。
-- **Agent Teams**：官方的 lead/teammate 组织（roster.json、plan 审批、worktree 隔离）。它是"组织内的层级协作"，本套件要的是"平级会话之上的独立监工"——supervisor 不属于团队、不写代码、只审查推进，与 Teams 的 lead（亲自干活的人）角色冲突。用跨会话 messaging + 自定义协议更贴合。
+- **notify_when_idle (v1 verdict, partially reversed in v2)**: not used as interruption detection or a completion signal (too weak, incomplete coverage, see 2.3), and the worker protocol already forces active reporting at every milestone, making a completion subscription redundant. Since v2 it is used only as a liveness signal (refreshing last_response_ts, see section 11), still never as a prompting trigger — prompting on idle would bombard a busy worker at turn frequency (every turn inside a long Phase is idle).
+- **Agent Teams**: the official lead/teammate organization (roster.json, plan approval, worktree isolation). It is "hierarchical collaboration inside an organization"; this suite wants "an independent supervisor above peer sessions" — the supervisor is not part of the team, writes no code, only reviews and advances, which conflicts with the Teams lead (the person doing the work). Cross-session messaging + a custom protocol fits better.
 
-## 3. 架构
+## 3. Architecture
 
 ```
-用户 ⟷ Supervisor 会话（监工，不写代码）
-              │ ListAgents / SendMessage（官方跨会话消息）
+User ⟷ Supervisor session (the supervisor; writes no code)
+              │ ListAgents / SendMessage (official cross-session messaging)
               │
      ┌────────┼────────┐
-   Worker A   Worker B  ...（工人会话，各管一段 scope）
+   Worker A   Worker B  ... (worker sessions, each owning a scope)
      │
-     │ StopFailure hook（回合失败时自动直投 supervisor UDS）
-     │ WORKER REGISTER / REPORT / STATUS / STALLED / RESUME（协议消息）
+     │ StopFailure hook (auto-delivers to supervisor UDS on turn failure)
+     │ WORKER REGISTER / REPORT / STATUS / STALLED / RESUME (protocol messages)
      ▼
 <project>/.supervisor/
-   state.json         ← 全局账本（supervisor 单写，原子写）
-   interrupts.jsonl   ← 中断流水（hook 追加写，append-only，永不回改）
-   acknowledged.jsonl ← 中断确认账本（supervisor 单写，append-only）
-   watchdog_state.json← 告警去重状态（watchdog 单写，原子写）
+   state.json         ← global ledger (supervisor single-writer, atomic writes)
+   interrupts.jsonl   ← interruption journal (hook appends; append-only, never rewritten)
+   acknowledged.jsonl ← interruption acknowledgment ledger (supervisor appends, append-only)
+   watchdog_state.json← alert de-duplication state (watchdog single-writer, atomic)
 ```
 
-三要素对应监工模式：
+The three elements map to the supervisor persona:
 
-- **被动守卫（Passive Guardrail）**：supervisor 从不主动打断 worker 干活；只在收到上报（或中断通知）后才对已产出的结果做后置审查（Post-audit）。触发器是消息，不是轮询（v2 唯一例外：定时自巡检 cron，见第 11 节，tick 无事时零消息零长输出）。
-- **OODA 循环**：Observe（读上报 + 亲自读文件/git diff 验证，不只信摘要）→ Orient（对照 goal 与账本）→ Decide（APPROVE / REFINE / ESCALATE）→ Act（SendMessage 下发结构化决策）。随下一次上报再次进入循环。
-- **全局状态存储**：`state.json` 记录 goal、per-worker phase、每次审查结论、事故流水。Loop Guard（同 phase 连续 3 次 REFINE → 升级用户）防"错改-回改"死循环。
+- **Passive Guardrail**: the supervisor never interrupts a working worker; it only post-audits produced output upon receiving a report (or an interruption notice). The trigger is a message, not polling (the sole v2 exception: the scheduled patrol cron, see section 11 — a no-op tick emits zero messages and zero long output).
+- **OODA loop**: Observe (read the report + personally read files / git diff to verify, never trust summaries alone) → Orient (compare against goal and ledger) → Decide (APPROVE / REFINE / ESCALATE) → Act (SendMessage delivers the structured decision). The loop re-enters on the next report.
+- **Global state storage**: `state.json` records goal, per-worker phase, every review verdict, and an incident journal. Loop Guard (3 consecutive REFINEs on the same phase → escalate to user) prevents an "edit-undo" death spiral.
 
-### 3.1 身份模型（session_id 主键）
+### 3.1 Identity model (session_id as primary key)
 
-worker 与 supervisor 的身份主键一律是 **session_id**（获取方式 v3 有变，见第 13 节：supervisor sid 首选 SessionStart 注入行，worker 注册时自报 sid 供交叉验证；name 也不再仅作展示，而是 SendMessage 的消息路由键——只认名称、必须唯一）：
+The identity primary key for workers and supervisors is always **session_id** (acquisition changed in v3, see section 13: supervisor sid prefers the SessionStart-injected line; workers self-report their sid at registration for cross-validation; the name is no longer display-only — it is SendMessage's routing key: name-only, must be unique):
 
-- StopFailure hook 的准入判定是"stdin 的 session_id ∈ workers[].session_id"——名字重复、改名、同目录的用户会话、空账本都不会误报（P1-1/P1-3 修复）。
-- hook 寻址 supervisor：先 `supervisor_session_id` 精确匹配；id 失配再退到 `supervisor_name` + 会话 cwd == `project_dir` 双重校验——跨项目的同名 supervisor 会话不会被选中（P1-2 修复）。
-- 升级用户、WATCHDOG ALERT、interrupts 账本都携带 session_id，`claude --resume <session-id>` 的恢复指引可以直接兑现（P1-13 修复）。
-- worker 从子目录启动的场景：hook 从 StopFailure.cwd 向上逐级找 `.supervisor/state.json`，找到后靠 session_id 准入判定排除"路径上误撞的无关项目"（P1-4 修复）。
+- The StopFailure hook's admission rule is "stdin's session_id ∈ workers[].session_id" — duplicate names, renames, same-directory user sessions, and an empty ledger all fail to misfire (P1-1/P1-3 fixes).
+- Hook addressing the supervisor: exact `supervisor_session_id` match first; on id mismatch, fall back to `supervisor_name` + session cwd == `project_dir` double check — a same-name supervisor in another project is never selected (P1-2 fix).
+- User escalation, WATCHDOG ALERT, and the interrupts ledger all carry session_id, so `claude --resume <session-id>` recovery instructions can be honored directly (P1-13 fix).
+- Workers started from a subdirectory: the hook walks up from StopFailure.cwd to find `.supervisor/state.json`, then relies on session_id admission to rule out "unrelated projects accidentally on the path" (P1-4 fix).
 
-## 4. 中断模型（本套件的核心设计）
+## 4. Interruption Model (the core design of this suite)
 
-### 4.1 中断三分类
+### 4.1 Three classes of interruption
 
-worker 的中断按"谁能感知"分三类，处理主体完全不同：
+Worker interruptions classified by "who can perceive them", with completely different handling owners:
 
-| 类别 | 例子 | 谁能感知 | 处理层 |
+| Class | Example | Who perceives it | Handling layer |
 |---|---|---|---|
-| A. 模型可自见的失败 | 工具连续失败、依赖坏掉 | worker 模型自己（回合还在） | 协议层：WORKER STALLED |
-| B. 回合级传输失败 | 429 耗尽重试、网络错误、API 错误 | 模型**永远**没机会发言；但进程还活着，宿主的 hook 机制仍可执行 | StopFailure hook：WORKER INTERRUPTED |
-| C. 进程级死亡 | 进程被杀、终端关闭、机器休眠 | **没有任何 in-process 机制可用**——执行主体已消失 | 外部检测（watchdog/巡检）+ 人工 resume |
+| A. Failure visible to the model | consecutive tool failures, broken dependency | the worker model itself (turn still alive) | Protocol layer: WORKER STALLED |
+| B. Turn-level transport failure | 429 retry exhaustion, network error, API error | the model **never** gets to speak; but the process is alive and the host's hook machinery still runs | StopFailure hook: WORKER INTERRUPTED |
+| C. Process-level death | process killed, terminal closed, machine sleep | **no in-process mechanism is available** — the executing subject is gone | External detection (watchdog/patrol) + manual resume |
 
-### 4.2 为什么进程死亡"无能为力"是原理性的
+### 4.2 Why process death being "unhandled" is principled
 
-B 类与 C 类的本质区别：hook、模型自报、任何消息机制都寄生在 worker 进程里。进程死亡意味着**一切寄生于它的机制同时死亡**——StopFailure hook 没有宿主可执行，WORKER STALLED 没有发送方可发。这不是实现缺陷，是逻辑必然：你不能要求死者报丧。
+The essential difference between B and C: hooks, model self-reporting, any messaging mechanism all live inside the worker process. Process death means **every mechanism parasitic on it dies simultaneously** — the StopFailure hook has no host to run on; WORKER STALLED has no sender to send. This is not an implementation defect but a logical necessity: you cannot ask the dead to report their own death.
 
-因此 C 类只能由**进程之外的观察者**处理：
+Class C can therefore only be handled by an **observer outside the process**:
 
-1. watchdog（cron 定时器）发现 worker 超时静默 → 告警 supervisor；
-2. supervisor 巡检（ListAgents 确认可达性）→ 升级用户；
-3. 用户 `claude --resume <session-id>` 恢复会话（会话持久化在 `~/.claude/projects/` 的 jsonl 里，进程死亡不丢 transcript）→ worker 恢复后发 WORKER RESUME。
+1. watchdog (cron timer) detects a worker's overdue silence → alerts the supervisor;
+2. supervisor patrol (ListAgents confirms reachability) → escalates to the user;
+3. the user runs `claude --resume <session-id>` (sessions persist as jsonl under `~/.claude/projects/`; process death does not lose the transcript) → the worker sends WORKER RESUME after recovery.
 
-恢复的锚点是纪律而不是机制：worker 协议强制"每 Phase 立即 commit"，所以任何中断（B/C 类都一样）丢失的最多是当前 Phase 未提交的部分，历史成果在 git 里完好。
+The anchor of recovery is discipline, not mechanism: the worker protocol forces "commit immediately per Phase", so any interruption (B or C alike) loses at most the uncommitted part of the current Phase — history is safe in git.
 
-### 4.3 四层防御（按响应及时性排序；本节为 v2 历史叙述——v3 起 watchdog 升为第五层，见 §6 与 core「中断与失联处理（五层防御）」）
+### 4.3 Four-layer defense (ordered by response latency; this section is v2 historical narrative — since v3 the watchdog is the fifth layer, see §6 and core's "Interruption and Liveness Handling (Five-Layer Defense)")
 
 ```
-B类中断 ──→ ① StopFailure hook（秒级，自动）
-A类中断 ──→ ② 协议层 STALLED/RESUME（worker 自报，秒级）
-静默失联 ──→ ③ supervisor 巡检（v2 起为 10 分钟定时 cron + 被唤醒时顺带，分钟级）
-              ④ 外部 watchdog（cron，分钟级，覆盖 supervisor 自身不在线的盲区）
+Class B ──→ ① StopFailure hook (seconds, automatic)
+Class A ──→ ② Protocol-layer STALLED/RESUME (worker self-report, seconds)
+Silent loss ──→ ③ supervisor patrol (since v2: 10-minute cron + on being woken; minutes)
+              ④ external watchdog (cron, minutes; covers the blind spot when the supervisor itself is offline)
 ```
 
-四层互为冗余而非互斥：hook 投递失败（supervisor 进程也死了）时 `delivered: false` 落盘，③ 的补课逻辑会在 supervisor 下次醒来时追认；③ 依赖 supervisor 被唤醒（v2 起定时 cron 把它从"碰运气"升级为"最多 10 分钟必醒"），④ 用 cron 补上"supervisor 进程死亡时无人唤醒"的盲区（cron 调度器寄生在 supervisor 宿主进程里，宿主死则巡检死，第四层不降级）。
+The four layers are redundant, not mutually exclusive: if hook delivery fails (the supervisor process died too), `delivered: false` is persisted and ③'s catch-up logic reconciles on the supervisor's next awakening; ③ depends on the supervisor being woken (since v2 the scheduled cron upgrades this from "luck" to "awake at most 10 minutes later"); ④ uses cron to cover the blind spot "nobody wakes the supervisor when its process is dead" (the cron scheduler lives inside the supervisor's host process; if the host dies the patrol dies — the fourth layer does not degrade).
 
-### 4.4 失联判定的活性语义
+### 4.4 The liveness semantics of lost-contact determination
 
-**失联时钟只由 worker 主动发出的消息重置**（WORKER REPORT / STATUS / RESUME / REGISTER → `last_response_ts`）。supervisor 自己下发的指令（`last_instruction_ts`）只作展示，绝不参与判定。否则会出现"告警 → 发 STATUS CHECK → 时钟重置 → 再等一个周期"的无限循环，失联的 worker 永远升不了级（P1-10 修复）。
+**The lost-contact clock is reset only by messages the worker actively sends** (WORKER REPORT / STATUS / RESUME / REGISTER → `last_response_ts`). Instructions the supervisor sends (`last_instruction_ts`) are display-only and never part of the determination. Otherwise an "alert → send STATUS CHECK → clock reset → wait another cycle" infinite loop arises and a lost worker never escalates (P1-10 fix).
 
-supervisor v1 无法定时醒来，v2 起有 10 分钟巡检 cron（见第 11 节），但 STATUS CHECK 的"10 分钟无回应重试、再无回应升级"仍由 `pending_check = {ts, retries}` 状态承载：每次 supervisor 被唤醒（含 cron tick）时结算（超时则重试或升级），配合 watchdog 的 cron 摧发保证 supervisor 一定会被叫醒（P1-9 修复）。
+supervisor v1 could not wake itself on a timer; since v2 there is a 10-minute patrol cron (see section 11), but the "10 minutes no reply → retry, still no reply → escalate" logic is still carried by `pending_check = {ts, retries}` state: settled every time the supervisor is woken (including cron ticks), backed by the watchdog's cron to guarantee the supervisor is woken (P1-9 fix).
 
-## 5. StopFailure hook 设计细节
+## 5. StopFailure hook design details
 
-`hooks/worker-stopfailure.py`，注册于 `settings.json` 的 `hooks.StopFailure`。
+`hooks/worker-stopfailure.py`, registered under `settings.json`'s `hooks.StopFailure`.
 
-### 5.0 Stop 异常捕获 hook（stop-anomaly-capture.py，v3.2 新增）
+### 5.0 Stop anomaly-capture hook (stop-anomaly-capture.py, added in v3.2)
 
-`hooks/stop-anomaly-capture.py`，注册于 `hooks.Stop`（每回合结束都触发，与既有用户
-Stop hook 并存叠加）。判据与分级投递规则见 stop-anomaly.md（事故 transcript replay
-实证）：model-error（末条 assistant `model=="error"`）与 empty-turn:tail（末条零
-tool_use + 空/"…" 文本，尾部退化）单发即投递；empty-turn:full（整轮空）连击 ≥2 才
-投递。**性能门**：resolve_ledger 走纯目录上溯（`git_fallback=False`，不 spawn git）
-在尾扫之后、git fallback 之前判定——健康回合（受监与否、是否在 git 仓库内）零 git
-spawn、零状态写、零投递；未受监工会话每回合只付 stdin 读 + 目录上溯 + 一次有界
-尾扫（64KB 起步、毫秒级；尾扫不可省——正是回合分类在决定要不要付罕见的 git
-spawn）；git rev-parse fallback 只在异常回合的 worktree 场景才付（罕见路径）。
-`resolve_supervisor` 刻意不做 name fallback：sid 缺失时只落盘 interrupts.jsonl
-走 catch-up，不做活投递（name-only 命中恰是 v3 要防的误投向量）。连击计数在
-分片 `anomaly_state.json`（单写者原子写，绝不与 watchdog_state.json 共文件）；
-已知边界：读-改-写跨进程存在丢失更新窗口——两个 worker 同时异常时 streak 可能
-少数一次，后果仅是多抑制一回合（full 需连击 ≥2 的路径），可接受不修。
+`hooks/stop-anomaly-capture.py`, registered under `hooks.Stop` (fires at every turn end, coexisting with any pre-existing user Stop hook). Criteria and tiered delivery rules are in stop-anomaly.md (evidenced by incident transcript replay): model-error (last assistant entry has `model=="error"`) and empty-turn:tail (last entry has zero tool_use + empty/"…" text — tail degradation) are delivered on first occurrence; empty-turn:full (an entirely empty turn) requires a streak ≥2 before delivery. **Performance gate**: resolve_ledger uses pure directory walk-up (`git_fallback=False`, spawns no git) and is decided after the tail scan but before the git fallback — a healthy turn (supervised or not, in a git repo or not) pays zero git spawns, zero state writes, zero deliveries; an unsupervised session pays only stdin read + directory walk-up + one bounded tail scan (64KB floor, milliseconds; the tail scan cannot be skipped — it is exactly what decides whether the rare git spawn is paid); the git rev-parse fallback is paid only on anomalous turns in worktree scenarios (rare path). `resolve_supervisor` deliberately has no name fallback: if sid is missing, it only writes interrupts.jsonl for catch-up and does no live delivery (a name-only hit is precisely the mis-delivery vector v3 exists to prevent). Streak counters live in the shard's `anomaly_state.json` (single-writer atomic write, never sharing a file with watchdog_state.json); known boundary: the read-modify-write has a lost-update window across processes — two workers going anomalous simultaneously may undercount a streak by one, whose only consequence is suppressing one extra turn (the full-streak≥2 path); acceptable, not fixed.
 
-### 5.1 身份判定
+### 5.1 Identity determination
 
-见 3.1。判定链（全通过才投递）：
+See 3.1. The chain (all gates must pass before delivery):
 
-1. 从 StopFailure.cwd 向上找到 `.supervisor/state.json`（找不到 → 非监工项目，退出）；
-2. `done: true` → 退出；
-3. stdin 的 session_id 必须在 `workers[].session_id` 中（不在 → 退出；空 workers 数组天然全拒）。
+1. Walk up from StopFailure.cwd to find `.supervisor/state.json` (not found → not a supervised project, exit);
+2. `done: true` → exit;
+3. stdin's session_id must be in `workers[].session_id` (absent → exit; an empty workers array rejects everything by construction).
 
-### 5.2 supervisor 发现算法
+### 5.2 Supervisor discovery algorithm
 
 ```
 state.supervisor_session_id
-  → 扫 ~/.claude/sessions/*.json，sessionId 精确匹配且 socket 存活 → 用它
+  → scan ~/.claude/sessions/*.json, exact sessionId match with live socket → use it
 state.supervisor_name + state.project_dir
-  → name 匹配 且 会话 cwd == project_dir 且 socket 存活 → 取 updatedAt 最新
-  → 都不中 → 不投递（interrupts.jsonl 仍落盘，等补课）
+  → name match AND session cwd == project_dir AND live socket → newest updatedAt
+  → neither hits → no delivery (interrupts.jsonl still written, awaiting catch-up)
 ```
 
-auth 在本平台是可选的（见 2.1），key 文件缺失/procStart 不匹配时降级为无 auth 帧投递，不阻断。
+Auth is optional on this platform (see 2.1); a missing key file or procStart mismatch degrades to unauthenticated frame delivery without blocking.
 
-### 5.3 落盘与确认语义（delivered / handled / acknowledged）
+### 5.3 Persistence and acknowledgment semantics (delivered / handled / acknowledged)
 
-`delivered` 的语义刻意收窄为"**字节写进了 supervisor 的 UDS**"——sendall 成功不代表 supervisor 处理了（目标进程可能在处理前退出、协议层拒绝或丢弃）。真正的送达确认走三层：
+`delivered` is deliberately narrowed to "**bytes written into the supervisor's UDS**" — sendall success does not mean the supervisor processed it (the target process may exit before processing, reject at the protocol layer, or drop it). True delivery confirmation goes through three layers:
 
-1. hook 每次中断追加一条（append-only，永不回改）到 `interrupts.jsonl`，字段含 `id`、`delivered`、`handled: false`；
-2. supervisor 收到 WORKER INTERRUPTED（或补课时）处理完该中断后，**追加** `{"id": ..., "ts": ..., "action": ...}` 到 `acknowledged.jsonl`（自己的单写账本）；
-3. supervisor 每次被唤醒做差集：`interrupts.jsonl 的 id - acknowledged.jsonl 的 id` = 未处理中断，逐条补处理。
+1. On every interruption the hook appends one record (append-only, never rewritten) to `interrupts.jsonl`, with fields `id`, `delivered`, `handled: false`;
+2. after handling a WORKER INTERRUPTED (or doing catch-up), the supervisor **appends** `{"id": ..., "ts": ..., "action": ...}` to `acknowledged.jsonl` (its own single-writer ledger);
+3. every time the supervisor wakes it computes the difference: `ids in interrupts.jsonl − ids in acknowledged.jsonl` = unhandled interruptions, handled one by one.
 
-这个设计避免了"原地给 JSONL 行打标"的写-写竞态（supervisor 重写文件会覆盖 hook 并发追加的行），两个账本各自 append-only、单写者明确（P1-5/P1-7 修复）。
+This design avoids the write-write race of "flipping flags on JSONL lines in place" (a supervisor rewriting the file would clobber lines the hook concurrently appends) — two ledgers, each append-only with an unambiguous single writer (P1-5/P1-7 fixes).
 
-### 5.4 安全边界
+### 5.4 Safety boundary
 
-hook 挂在用户全局 settings.json 上，失败模式必须极度保守：
+The hook hangs off the user's global settings.json, so its failure modes must be extremely conservative:
 
-- 任何异常（含 stdin 畸形、文件不可读、socket 拒连、字段类型异常）→ 静默 `exit 0`；
-- 时间预算有界：UDS connect 1s + send 1s，无等待性 recv（原版 recv(2) 已移除），落盘只 flush 不 fsync（P2-1 修复）；
-- 所有外部输入（error/error_details/sessions 字段）先做类型防御（`as_text` 强转、dict/str 校验）再使用，防异常逃逸（P2-2 修复）；
-- 只读 state.json/sessions，只追加 interrupts.jsonl，**永不碰 state.json**（那是 supervisor 的单写者领地）。
+- Any exception (malformed stdin, unreadable files, socket refusal, weird field types) → silent `exit 0`;
+- Bounded time budget: UDS connect 1s + send 1s, no waiting recv (the original recv(2) is removed), persistence flushes but never fsyncs (P2-1 fix);
+- All external input (error/error_details/sessions fields) is type-defended (`as_text` coercion, dict/str validation) before use, preventing exception escape (P2-2 fix);
+- Reads only state.json/sessions, appends only to interrupts.jsonl, **never touches state.json** (that is the supervisor's single-writer territory).
 
-### 5.5 退避与唤醒（supervisor 侧协议）
+### 5.5 Backoff and wake-up (supervisor-side protocol)
 
-supervisor 收到 WORKER INTERRUPTED 后：
+On receiving WORKER INTERRUPTED:
 
-- kind 为 rate-limit/network：`ScheduleWakeup(delaySeconds=300)` 延迟唤醒后 SendMessage 唤醒（v2 起；v1 用 Bash `sleep 300`，存在 Bash 工具默认 2 分钟超时提前打断退避的坑，已废弃）。**流程纪律：落账在前、arm 在后**——ScheduleWakeup arm 后本回合即结束，incidents/acknowledged/pending_check 必须在 arm 之前落账，唤醒指令整体内嵌于自包含 prompt。
-- 多 worker 同时中断：错峰，每个额外 +60s（sleep 360/420/...），避免同时唤醒再次集体撞限流。
-- kind 为 api-error：退避缩至 60s；重试后仍中断直接升级用户（大概率是配置/额度问题，重试无益）。
-- 唤醒后置 `pending_check`，重试/升级由后续唤醒结算（见 4.4）。
+- kind rate-limit/network: `ScheduleWakeup(delaySeconds=300)` delayed wake, then SendMessage wakes the worker (since v2; v1 used Bash `sleep 300`, which had the pit of Bash's default 2-minute tool timeout aborting the backoff early — deprecated). **Flow discipline: ledger first, arm after** — once ScheduleWakeup is armed the turn ends, so incidents/acknowledged/pending_check must be written before arming, and the wake instruction is embedded wholesale in a self-contained prompt.
+- Multiple workers interrupted together: stagger, each additional +60s (sleep 360/420/...), avoiding a collective re-collision with rate limits on simultaneous wake.
+- kind api-error: backoff shrinks to 60s; if it interrupts again after retry, escalate straight to the user (most likely a config/quota problem — retrying is futile).
+- After waking, set `pending_check`; retry/escalation is settled by subsequent wake-ups (see 4.4).
 
-## 6. watchdog 设计细节
+## 6. watchdog design details
 
-`watchdog.sh`（安装为 `~/.claude/supervisor/supervisor-watchdog`），cron 定时调用。
+`watchdog.sh` (installed as `~/.claude/supervisor/supervisor-watchdog`), invoked by cron.
 
-- **失联判定与 4.4 相同**：只认 `last_report_ts` / `last_response_ts` / `registered_at`，忽略 `last_instruction_ts`。
-- **时间解析**：ISO-8601 容错（`fromisoformat` + `Z` 后缀归一 + 两套 fallback 格式），时区偏移会换算到本地再比较；解析失败该 worker 跳过本轮（保守不告警），不做任何输出（P1-11/P2-3 修复）。
-- **告警去重（梯度升级）**：`.supervisor/watchdog_state.json` 记录每 worker 上次告警时的静默分钟数；仅当静默又增长一个完整阈值（T, 2T, 3T...）或条目是新的才再告警。去重状态先原子落盘再发告警——崩溃时最坏丢一条，绝不会有告警风暴（P1-12 修复；空 to_alert 时完全静默）。
-- **macOS 通知**：通知文本经 `osascript` 的 `on run argv` 传参，**永不**拼进 AppleScript 源码——worker 名来自 state.json，是不可信输入（P0-3 修复）。
-- **外部进程调用（osascript）**：参数数组式 subprocess，无 shell 拼接。
-- **永远 exit 0**：shell 层 `trap 'exit 0' EXIT` + python 层 `2>/dev/null || exit 0`，cron 永远收不到错误输出。
-- **v3.1 supervisor 自检（第五层）**：per-ledger 循环开头（done 跳过后、worker overdue 判定前——零 worker 分片也走得到）读 `.supervisor/registry.json` 本分片 supervisor 的 `heartbeat_ts`：停更超过阈值且会话 socket 不存在 → **DEAD**（osascript 桌面通知引导用户 `claude --resume`）；停更但 socket 仍在 → **DEGRADED**（疑似模型劣化，请求人工介入；通知文本含 kill -9 残留 socket 的兜底指引）。socket 探活遍历全部同 sid 记录、任一活即 alive（与 worker 路由同姿势，防 resume 残留死记录把活 supervisor 误判 DEAD）。通知直投用户而非 supervisor UDS（病人不能给自己叫医生）。去重与 worker 梯度共用分片 `watchdog_state.json`（key `supervisor:<sid>`，basis=心跳 ISO 时间，心跳前移即重置；多分片各自独立去重，case U 实测隔离）。心跳刷新由 supervisor 巡检协议承载（每轮顺带 `registry.py heartbeat`，协议要求 `--project-dir` 必传——漏传会按 CWD 读错 registry、心跳刷不进真文件 → 假 DEAD），watchdog 只读不写 registry。cron 注册/移除由 supervisor 启动协议步骤 7b 与收尾步骤承载（标识注释行 + 条目行成对操作，幂等；先落临时文件再 `crontab "$TMPF"` 装回，防管道中断丢整份 crontab；移除前先查 registry 同项目他人活跃条目——多 supervisor 并存时 A 收尾不拆 B 还在用的 cron）。已知边界：①心跳只在巡检时刷新、cron tick 等当前回合结束才注入——超过阈值的长回合会产生一次假 DEGRADED（梯度去重封顶一次，可忽略）；②kill -9 崩溃残留 socket 文件时真 DEAD 会被分诊为 DEGRADED（兜底指引已引导用户按 DEAD 处理）。
+- **Lost-contact rule identical to 4.4**: only `last_report_ts` / `last_response_ts` / `registered_at` count; `last_instruction_ts` is ignored.
+- **Time parsing**: ISO-8601 tolerant (`fromisoformat` + `Z`-suffix normalization + two fallback formats); timezone offsets are converted to local before comparison; on parse failure that worker is skipped this round (conservatively no alert) with zero output (P1-11/P2-3 fixes).
+- **Alert de-duplication (gradient escalation)**: `.supervisor/watchdog_state.json` records each worker's silence minutes at last alert; a new alert fires only when silence grows by another full threshold (T, 2T, 3T...) or the entry is new. De-duplication state is atomically persisted before alerting — worst case on crash is losing one alert, never an alert storm (P1-12 fix; completely silent when to_alert is empty).
+- **macOS notifications**: notification text is passed via `osascript`'s `on run argv` parameters, **never** spliced into AppleScript source — worker names come from state.json, which is untrusted input (P0-3 fix).
+- **External process invocation (osascript)**: array-style subprocess arguments, no shell concatenation.
+- **Always exit 0**: shell-level `trap 'exit 0' EXIT` + python-level `2>/dev/null || exit 0`; cron never sees error output.
+- **v3.1 supervisor self-check (fifth layer)**: at the top of the per-ledger loop (after done is skipped, before worker-overdue judgment — reachable even for zero-worker shards) read `.supervisor/registry.json` for this shard's supervisor `heartbeat_ts`: staled beyond threshold and the session socket is gone → **DEAD** (osascript desktop notification guiding the user to `claude --resume`); staled but socket still present → **DEGRADED** (suspected model degradation, requests human intervention; the notification text includes the kill -9 residual-socket fallback guidance). Socket liveness probes all same-sid records, any one alive counts as alive (same posture as worker routing, preventing a stale dead record from misjudging a live resumed supervisor as DEAD). Notifications go straight to the user, not the supervisor's UDS (the patient cannot call the doctor for itself). De-duplication shares the shard's `watchdog_state.json` with the worker gradient (key `supervisor:<sid>`, basis = heartbeat ISO time; a moved-forward heartbeat resets it; multiple shards dedupe independently, verified by case U). Heartbeat refreshing is carried by the supervisor's patrol protocol (each round incidentally runs `registry.py heartbeat`; the protocol requires `--project-dir` to be passed — omitting it reads the wrong registry by CWD and the heartbeat never reaches the real file → false DEAD). The watchdog only reads, never writes, the registry. Cron registration/removal is carried by supervisor startup step 7b and the wrap-up steps (marker comment line + entry line manipulated as a pair, idempotent; a temp file is written before `crontab "$TMPF"` installs it back, preventing a pipe break from losing the whole crontab; before removal, other active entries for the same project are checked — with multiple supervisors, A's wrap-up doesn't tear down B's still-in-use cron). Known boundaries: ① the heartbeat refreshes only on patrol and cron ticks are injected only after the current turn ends — a turn longer than the threshold produces one false DEGRADED (gradient dedup caps it at once, negligible); ② a kill -9 crash leaving a residual socket file gets triaged as DEGRADED even when truly DEAD (the fallback guidance already directs the user to treat it as DEAD).
 
-## 7. 数据文件与并发纪律
+## 7. Data files and concurrency discipline
 
-| 文件 | 写者 | 模式 |
+| File | Writer | Mode |
 |---|---|---|
-| `state.json` | supervisor 单写 | 读-改-写，**原子写**（tmp + rename），更新前重读最新 |
-| `interrupts.jsonl` | hook 追加写 | append-only，永不回改 |
-| `acknowledged.jsonl` | supervisor 追加写 | append-only（中断确认） |
-| `watchdog_state.json` | watchdog 单写 | 原子写（mkstemp + replace） |
+| `state.json` | supervisor single-writer | read-modify-write, **atomic** (tmp + rename), re-read latest before updating |
+| `interrupts.jsonl` | hook appends | append-only, never rewritten |
+| `acknowledged.jsonl` | supervisor appends | append-only (interruption acknowledgment) |
+| `watchdog_state.json` | watchdog single-writer | atomic write (mkstemp + replace) |
 
-单写者 + append-only + 原子写三原则下，唯一的残余竞态是**读者读到半写文件**：hook/watchdog 读 state.json 遇到解析失败按"未监工/跳过本轮"处理（保守放弃，下一轮 cron 或下一次中断会补上），supervisor 写 state.json 必须走 tmp+rename 原子发布（P1-6 修复，协议层约束——supervisor 是 LLM 不是程序，靠协议明文要求）。`.supervisor/` 整体建议进 .gitignore。
+Under the three principles — single writer, append-only, atomic write — the only residual race is **a reader seeing a half-written file**: when the hook/watchdog hits a parse failure reading state.json, it treats it as "not supervised / skip this round" (conservative abandonment; the next cron round or the next interruption catches up). The supervisor's state.json writes must use tmp+rename atomic publication (P1-6 fix, a protocol-layer constraint — the supervisor is an LLM, not a program; the protocol states it in plain text). The whole `.supervisor/` directory should go into .gitignore.
 
-## 8. install.sh 设计细节
+## 8. install.sh design details
 
-- **损坏的 settings.json → 备份后中止安装**，绝不自动重置全局配置（P0-2 修复）；
-- **已有同名文件先备份再覆盖**（时间戳后缀 `.bak-<stamp>`，内容相同时跳过备份）（P0-1 修复）；
-- hook 注册命令用 `shlex.quote()` 构建，路径含单引号也安全（P2-5 修复）；
-- settings.json 更新：flock 排他锁 + mkstemp 唯一临时文件 + fsync + 保留原文件 mode + os.replace 原子发布（P2-4 修复）；
-- hooks 配置结构异常（非对象/非数组）时中止而不是破坏。
+- **A corrupted settings.json → back up then abort the install**; never silently reset global config (P0-2 fix);
+- **Existing same-name files are backed up before overwrite** (timestamp suffix `.bak-<stamp>`; identical content skips the backup) (P0-1 fix);
+- hook registration commands are built with `shlex.quote()`, safe even for paths containing single quotes (P2-5 fix);
+- settings.json update: flock exclusive lock + mkstemp unique temp file + fsync + original file mode preserved + os.replace atomic publication (P2-4 fix);
+- abnormal hooks configuration structure (non-object / non-array) aborts instead of destroying.
 
-## 9. 已知边界（记录在案，非缺陷待修）
+## 9. Known Boundaries (on the record; not defects awaiting fixes)
 
-1. **进程死亡无自动恢复**（4.2 节，原理性）：watchdog 只能检测+告警，resume 必须人手执行。
-2. **模式选择是用户显式决策**（12.1 节）：绿地（/supervisor）与重构（/rework）的选型由用户拍板，协议不做任务类型自动判定——软判定判错模式整场错配，宁可多问一次人。
-3. **hook 版本依赖**：StopFailure 事件在 2.1.259 二进制中确认存在，官方无文档；Claude Code 升级后该机制可能变化，需要重跑 `test_stopfailure.sh` 回归。
-4. **peerToken 非硬校验**：本平台 auth optional，恶意本地进程本就能读同一 key 文件——本套件不提供跨进程认证，只在单用户信任域内工作。
-5. **错误分类是启发式**：`classify_error` 按错误串关键字归类（429/rate limit/overloaded → rate-limit；timeout/econnreset → network；其余 → api-error），决定退避时长。误分类的后果只是退避时长不优，不影响正确性。
-6. **协议对 LLM 的依赖（遵循度不可确保，只能工程化对冲）**：监工人格由 slash command 注入——`/supervisor` 的本质是把协议全文作为一条长 user prompt 发给模型，没有任何进程级隔离或角色绑定。prompt 是软约束，LLM 遵循度永远不是 100%：监工可能跳过某次巡检、忘掉 Loop Guard、在多次 REFINE 后行为漂移（长会话 context 压缩会加速漂移）。**无法根除，只能对冲**，本套件的对冲分三层：
-   - **把确定性逻辑从 LLM 手里拿走**：中断检测的触发不依赖监工自觉——StopFailure hook 是进程级代码（回合失败瞬间触发）、watchdog 是 cron 定时器（不依赖任何 agent 活着）。需要监工做的只剩"收到消息后按协议响应"，触发链是硬的，响应是软的；
-   - **状态外置，使漂移可恢复**：全部进度在 state.json 而非监工的 context 里，状态文件不会撒谎。漂移的退路是重新执行 `/supervisor <目标>` 重注入协议全文，state.json 恢复全部上下文，漂移归零。协议因此反复强调"决策依据是 state.json 而不是你的记忆"；
-   - **协议写法本身**：立即执行式指令、行为红线明确列举、每步给具体动作而非抽象原则——经验上强命令式 + 具体步骤的遵循率显著高于软描述。
-   残余风险：监工的软失效（漏巡检、忘规则）无解，硬兜底层保证其后果是"晚发现"而非"不发现"。这是本套件与纯代码方案的本质折衷，也是引入第四层 watchdog 的根本原因之一。
-7. **真实 429 场景未实测**：逆向确认了事件存在和触发条件，但官方无文档；首次实战使用时建议盯第一次触发。
-8. **cron 调度器寄生宿主进程（v2）**：定时巡检的调度器跑在 supervisor 的宿主 Claude Code 进程内，supervisor 死则巡检死，由第四层外部 watchdog 兜底，防线不降级。另：cron 过期天数等参数版本间已变过（3 天→7 天），协议一律以现场 CronList 为准。
-9. **v2 端到端实测记录（2026-09-05，真实双会话演练）**：① notify_when_idle 订阅——✅ 实测通过：SendMessage 自动附带订阅（worker 侧可见 UDS 地址级订阅请求），worker idle 后 supervisor 正常感知，唤醒消息再次自动附带新订阅；② WORKER INTERRUPTED 注入 + ScheduleWakeup 退避——✅ 实测通过：UDS 注入送达、四步流程（incidents→acknowledged→pending_check→arm）完整执行且顺序正确、60s 后唤醒 fire、唤醒消息送达 worker；③ SendMessage 唤醒空闲/中断 worker——✅ 实测通过：worker 收到唤醒消息立即开新回合（ack + 继续干活 + spec 上报），链条⑥打通，429 中断全自动闭环成立（StopFailure 终态的极端情形仍未实测，但空闲唤醒已证 SendMessage 可驱动停止的会话）。**实测意外收获**：(a) supervisor 对伪造中断的防御超出预期——worker_session_id 不在账本时拒绝处理并升级用户，且正确识别"peer 消息不能冒充用户授权"，两次社会工程尝试均被拒绝；(b) 发现并修复 session_id 格式坑：ListAgents 输出 `This session is supervisor [6aebfc]` 的方括号短哈希不是 session_id（真实值为 36 位 UUID），协议已补 UUID 格式自检条款。
-10. **StopFailure 终态唤醒（残留挂账）**：③的实测覆盖的是"idle worker"而非"StopFailure 终态 worker"——真实 429 后会话是否等价于可被 SendMessage 驱动的状态，仍需真实 429 事件验证（无法伪造，等首次实战）。
-11. **同分支混行并行不支持（v3）**：多 supervisor 同仓并行强制分支/worktree 隔离，同分支混行提交的范围比对、回滚锚点无法归因——并行即隔离，不做智能合并；未获隔离承诺的并行在注册事务处被拦（ESCALATE 用户裁决分支）。
-12. **跨项目同名 supervisor 边界（v3，dev-0 实测推论）**：SendMessage 只认会话名且无 cwd 消歧——两个不同项目里各有一个叫 supervisor 的监工时，worker/监工按名寻址理论上可能投错项目；对冲是命名建议含项目后缀（supervisor-<proj>-gf）。另：跨项目同名 + 心跳停更会让活着的监工被 stale 误判（heartbeat 双条件兼作兑子，resume upsert 自愈）。dev-6 冒烟未含双 project-dir 同名实测（挂账，见 plan 未做项）。另 dev-6 已实测定案：`<名>[<短ID>]` 消歧形式 SendMessage 不可达（返回 No agent named，did-you-mean 提示剥后缀）——worker.md 已据此收紧为“同名多条请用户先 rename”；idle 存活会话在 ListAgents 可见（sup 冒烟会话实测，ps 佐证进程存活），stale 判定按 name 查可达的语义成立。
+1. **No automatic recovery from process death** (§4.2, principled): the watchdog can only detect + alert; resume must be done by hand.
+2. **Mode selection is an explicit user decision** (§12.1): greenfield (/supervisor) vs rework (/rework) is the user's call; the protocol does no automatic task-type classification — a soft misjudgment mismatches the whole run; better to ask the human once more.
+3. **Hook version dependence**: the StopFailure event is confirmed present in the 2.1.259 binary with no official docs; a Claude Code upgrade may change the mechanism — re-run `test_stopfailure.sh` regression.
+4. **peerToken is not a hard check**: auth is optional on this platform; a malicious local process could read the same key file anyway — this suite provides no cross-process authentication and works only within a single-user trust domain.
+5. **Error classification is heuristic**: `classify_error` groups by keyword (429/rate limit/overloaded → rate-limit; timeout/econnreset → network; else api-error) and decides backoff duration. Misclassification only yields a suboptimal backoff, never incorrect behavior.
+6. **Dependence on the LLM (compliance can't be guaranteed, only engineered against)**: the supervisor persona is injected via slash command — `/supervisor` is fundamentally the protocol text sent to the model as one long user prompt, with no process-level isolation or role binding. Prompts are soft; LLM compliance is never 100%: the supervisor may skip a patrol, forget the Loop Guard, drift after repeated REFINEs (long-session context compaction accelerates drift). **Cannot be eradicated, only hedged**, in three layers:
+   - **Take deterministic logic away from the LLM**: interruption detection triggers don't depend on supervisor diligence — the StopFailure hook is process-level code (fires the instant a turn fails), the watchdog is a cron timer (depends on no agent being alive). All the supervisor needs to do is "respond per protocol upon receiving a message"; the trigger chain is hard, only the response is soft.
+   - **Externalized state makes drift recoverable**: all progress lives in state.json, not the supervisor's context; state files don't lie. The escape from drift is re-running `/supervisor <goal>` to re-inject the full protocol — state.json restores all context and drift resets to zero. Hence the protocol's repeated insistence that "the decision basis is state.json, not your memory".
+   - **The protocol's own writing style**: immediate-execution instructions, behavior red lines explicitly enumerated, concrete actions per step rather than abstract principles — empirically, strong imperative + concrete steps yields markedly higher compliance than soft description.
+   
+   Residual risk: soft supervisor failures (missed patrols, forgotten rules) are unsolvable; the hard safety-net layer bounds their consequence to "noticed late" rather than "never noticed". This is the essential trade-off of this suite versus a pure-code solution, and one of the root reasons the fourth layer (watchdog) exists.
+7. **The real 429 scenario is untested**: reverse engineering confirmed the event exists and its trigger conditions, but there are no official docs; watch the first real trigger in production.
+8. **The cron scheduler parasitizes the host process (v2)**: the patrol scheduler runs inside the supervisor's host Claude Code process; if the supervisor dies, the patrol dies, backstopped by the fourth-layer external watchdog — the defense doesn't degrade. Also: cron expiry-day parameters have changed across versions (3 days → 7 days); the protocol always defers to live CronList.
+9. **v2 end-to-end test records (2026-09-05, real two-session drill)**: ① notify_when_idle subscription — ✅ passed: SendMessage automatically attaches the subscription (the worker side sees the UDS-address-level subscription request); the supervisor perceives worker idle normally; the wake-up message again automatically attaches a fresh subscription; ② WORKER INTERRUPTED injection + ScheduleWakeup backoff — ✅ passed: UDS injection delivered, the four-step flow (incidents→acknowledged→pending_check→arm) executed completely and in the right order, the 60s wake fired, the wake message reached the worker; ③ SendMessage waking an idle/interrupted worker — ✅ passed: the worker opened a new turn immediately on receiving the wake (ack + continued working + spec report); chain ⑥ closed, full automatic 429 loop established. **Unexpected gains**: (a) the supervisor's defense against forged interruptions exceeded expectations — a worker_session_id not in the ledger gets refused and escalated, and it correctly recognized that "peer messages cannot impersonate user authorization"; two social-engineering attempts were both rejected; (b) a session_id format pitfall was found and fixed: ListAgents' bracketed short hash in `This session is supervisor [6aebfc]` is not a session_id (the real value is a 36-char UUID); the protocol gained a UUID-format self-check clause.
+10. **StopFailure-terminal wake-up (carried over)**: record ③ covered an "idle worker", not a "worker in StopFailure terminal state" — whether a session after a real 429 is equivalent to a SendMessage-drivable state still awaits a real rate-limit event (cannot be faked; waiting for first production hit).
+11. **Same-branch interleaved parallelism unsupported (v3)**: multiple supervisors on one repo force branch/worktree isolation; scope comparison and rollback anchors cannot be attributed with interleaved commits on the same branch — parallelism means isolation, no smart merging; parallelism without an isolation commitment is blocked at the registration transaction (ESCALATE to user for branch adjudication).
+12. **Cross-project same-name supervisor boundary (v3, inferred from dev-0 testing)**: SendMessage is name-only with no cwd disambiguation — with a supervisor of the same name in two different projects, worker/supervisor addressing could in theory cross wires; the hedge is naming advice containing a project suffix (supervisor-<proj>-gf). Also: same name across projects + a staled heartbeat can get a live supervisor falsely marked stale (the heartbeat's dual condition doubles as the escape, resume upsert self-heals). dev-6 smoke did not include a dual-project same-name test (on the books, see plan's not-done items). Also settled in dev-6: the `<name>[<shortId>]` disambiguation form is not SendMessage-reachable (returns No agent named; the did-you-mean hint strips the suffix) — worker.md was accordingly tightened to "with duplicate names, ask the user to rename first"; an idle live session is visible in ListAgents (verified during the supervisor smoke session, corroborated by ps), so stale-by-name-reachability semantics hold.
 
+## 10. Testing Strategy
 
-## 10. 测试策略
+`test_stopfailure.sh` (65 assertions), `test_watchdog.sh` (32 assertions) and `test_registry.sh` (29 assertions) are assertion-style regression tests, fully sandboxed (fake sessions dirs, fake state.json, a fake UDS server; registry tests pin a temp dir via the CLAUDE_SUPERVISOR_DIR env var), keeping their temp dirs on failure for debugging and cleaning up on success. Coverage matrix:
 
-`test_stopfailure.sh`（65 项断言）、`test_watchdog.sh`（32 项断言）与 `test_registry.sh`（29 项断言）均为断言型回归测试，完全沙箱化（伪 sessions 目录、伪 state.json、假 UDS 服务端；registry 测试经 CLAUDE_SUPERVISOR_DIR 环境变量钉到临时目录），失败时保留临时目录供排障、成功时自动清理。覆盖矩阵：
+- hook: normal delivery (auth+user frames, kind classification, phase, session_id in the ledger), zero false-fire for stranger sessions / empty workers / done projects / no state dir, subdirectory cwd walk-up, socket present but refusing (real connect-failure branch), auth degradation on missing key, malformed stdin, non-string error_details, same-name supervisor decoys not selected; v3 additions: multi-shard targeted delivery / zero-hit and double-hit ambiguity non-delivery, flat-layout fallback and upgrade window (case18b: with 1 shard + v2 flat layout coexisting, pass-2 disabled — no misdelivery), worktree discovery, archive invisible, shard guard (blocking registry direct writes / wrong-sid deny / short-circuit allow), identity injector (startup/resume/garbage-silent);
+- watchdog: overdue alert (with session_id), same-silence-level dedup, `last_instruction_ts` not suppressing alerts (independently asserted in case C), silent for fresh workers / recently-responded / done projects, silent exit on invalid threshold / directory / corrupted state / non-list workers, gradient re-trigger (case O), gradient reset after recovery (case P: a changed basis snapshot starts a new silence cycle), RFC3339 Z timestamp parsing; v3 additions: shard iteration with flat fallback, multi-shard independent alerts and non-interfering dedup, UDS direct delivery targeted by supervisor_session_id, archive invisible;
+- registry: first start on a fresh project (directories self-created), two-phase isolation transaction (KNOWN_OTHERS full sid lines, prefix cannot satisfy the grown check), name-collision exit 3, idempotent upsert, heartbeat rejecting nameless rebuild for missing entries / rebuild on collision, mark-stale/unregister existence and idempotency, --project-dir off-site location, corrupted registry reset, 6-way concurrent registration with zero dirty writes.
 
-- hook：正常投递（auth+user 帧、kind 分类、phase、session_id 落账）、陌生人会话/空 workers/done 项目/无 state 目录的零误伤、子目录 cwd 向上寻址、socket 存在但拒连（真 connect 失败分支）、key 缺失的 auth 降级、畸形 stdin、非字符串 error_details、同名 supervisor 诱饵不被选中；v3 增量：多分片定向投递/零命中与双命中歧义不投递、平铺回退与升级窗口（case18b：1 分片 + v2 平铺共存时 pass-2 禁用不错投）、worktree 发现、archive 不可见、分片守卫（拦 registry 直写/错 sid deny/短路放行）、身份注入器（startup/resume/垃圾静默）；
-- watchdog：逾期告警（含 session_id）、同静默级别去重、`last_instruction_ts` 不抑制告警（case C 独立断言）、新鲜 worker/最近响应/done 项目静默、非法阈值/目录/损坏 state/workers 非列表的静默退出、梯度升级再触发（case O）、恢复后梯度重置（case P：basis 快照变更即新静默周期）、RFC3339 Z 时间戳解析；v3 增量：分片遍历与平铺回退、多分片独立告警与去重互不干扰、UDS 直投按 supervisor_session_id 定向、archive 不可见；
-- registry：全新项目首启（目录自建）、两阶段隔离事务（KNOWN_OTHERS 完整 sid 行、前缀不可满足 grown 校验）、撞名 exit 3、幂等 upsert、heartbeat 缺失条目拒绝无名重建/撞名重建、mark-stale/unregister 存在性与幂等、--project-dir 异位定位、损坏 registry 重置、6 并发注册零脏写。
+One recorded testing lesson: hard-appending a `Z` suffix to a local naive timestamp turns it into a "future time" (UTC parsing runs 8 hours ahead of the local wall clock), making silence negative and never alerting — test case K covers the Z-parsing path separately with a genuine UTC past timestamp.
 
-测试数据的一个教训值得记录：给本地 naive 时间戳硬加 `Z` 后缀会把它变成"未来时间"（UTC 解析比本地墙钟早 8 小时），导致静默值为负、永不告警——测试用例 K 用真正的 UTC 过去时间戳单独覆盖 Z 解析路径。
+The end-to-end real-429 path (Claude Code triggers StopFailure → hook delivery → supervisor backoff and wake) remains untested; watch the first production trigger.
 
-真实 429 场景的端到端（Claude Code 触发 StopFailure → hook 投递 → supervisor 退避唤醒）尚未实测，首次实战使用时建议盯第一次触发。
+## 11. Scheduled Self-Patrol and the Alignment Funnel (added in v2)
 
-## 11. 定时自巡检与对齐漏斗（v2 新增）
+Empirical basis: `specs/2026-09-05-scheduled-supervision/claude_cron.md` (field-test record of Claude Code 2.1.259's scheduled-task mechanism).
 
-实测依据见 `specs/2026-09-05-scheduled-supervision/claude_cron.md`（Claude Code 2.1.259 定时任务机制实测记录）。
+### 11.1 Scheduled self-patrol
 
-### 11.1 定时自巡检
+At startup the supervisor uses `CronCreate` to create a 10-minute session-only patrol cron whose prompt contains the three patrol steps + a CronList self-check rebuild (crons expire; rebuilding is routine) + a noop discipline (when nothing is due, output exactly one line, preventing context bloat from accelerating protocol dilution).
 
-supervisor 启动时用 `CronCreate` 创建每 10 分钟的 session-only 巡检 cron，prompt 含巡检三步 + CronList 自查重建（crons 自动过期，重建是例行动作）+ noop 纪律（无事时只输出一行，防上下文膨胀加速协议淡化）。
+Key design decision: **session-only (durable=false), not durable** — field tests showed durable tasks are directory-scoped: after the owner dies, other sessions in the same directory (workers) grab the lock and take over execution, and the patrol prompt would fire into a worker's context, polluting it; session-only guarantees the only executor is ever the supervisor itself. The cost: if the supervisor dies, the cron dies (acceptable — the fourth layer backstops).
 
-关键设计决定：**session-only（durable=false）而非 durable**——实测 durable 任务是目录级共享的，执行者死后同目录其他会话（worker）会抢锁接管执行，巡检 prompt 将 fire 进 worker 上下文造成污染；session-only 保证执行者永远只有 supervisor 自己。代价：supervisor 死则 cron 死（可接受，第四层兜底）。
+Idempotency: re-injecting the /supervisor protocol is the established drift-recovery mechanism; startup runs CronList dedup to prevent double crons. Wrap-up: CronDelete when everything is done.
 
-幂等：/supervisor 协议重注入是既定的漂移恢复手段，启动步骤先 CronList 查重防双 cron。收尾：全部 done 时 CronDelete。
+Signal frequency spectrum (bottom-up): minute-level watchdog alerts (hard) → 10-minute patrol tick (hard, host scheduler) → turn-level idle notices (hard, host) → milestone WORKER REPORT (soft).
 
-信号频率谱（自下而上）：分钟级 watchdog 告警（硬）→ 10 分钟巡检 tick（硬，宿主调度器）→ 回合级 idle 通知（硬，宿主）→ 里程碑 WORKER REPORT（软）。
+### 11.2 ScheduleWakeup backoff and flow re-ordering
 
-### 11.2 ScheduleWakeup 退避与流程重排
+Interruption backoff moved from Bash `sleep 300` to `ScheduleWakeup(delaySeconds=300, ...)`: eliminating the Bash 2-minute-default-timeout pit and the tool occupation. delaySeconds is runtime-clamped to [60,3600]; the api-error 60s backoff sits exactly at the lower bound. **The flow re-ordering is the heart of the change**: once armed, the turn ends, so ledger writes (incidents/acknowledged/pending_check) must precede arming, and the wake action moves wholesale into a self-contained prompt (no dependence on the original turn's memory).
 
-中断退避从 Bash `sleep 300` 改为 `ScheduleWakeup(delaySeconds=300, ...)`：消除 Bash 默认 2 分钟超时坑与工具占用。delaySeconds 运行时夹在 [60,3600]，api-error 类退避 60s 恰为下限。**流程重排是本改动的核心**：arm 后本回合即结束，所以落账（incidents/acknowledged/pending_check）必须前置于 arm，唤醒动作整体移入自包含 prompt（不依赖原回合记忆）。
+### 11.3 The idle liveness signal
 
-### 11.3 idle 活性信号
+Every supervisor SendMessage attaches a notify_when_idle subscription; receiving an idle notice has exactly one action — refresh `last_response_ts` (host-level hard evidence: the process is alive and the turn ended normally). **Explicitly not a prompting trigger**: the worker protocol is already "no report until the milestone is done", and every turn inside a long Phase is idle; prompting on idle would bombard a busy worker at turn frequency (CR P0-1 verdict). Whether to prompt goes solely through the existing 60-minute lost-contact rule — one logic, no dual track. The subscription mechanism is verified (see §9.8 record ①); if a future version breaks it, this section reverts.
 
-supervisor 每次 SendMessage 附带 notify_when_idle 订阅，收到 idle 通知唯一动作是刷新 `last_response_ts`（宿主级硬证据：进程活着、回合正常结束）。**明确不用作督促触发器**：worker 协议本就是不干完里程碑不上报，长 Phase 中间每回合都 idle，按 idle 督促会按回合频率轰炸正在干活的 worker（CR P0-1 裁定）。是否督促只走既有 60 分钟失联判定，一套逻辑不双轨。订阅机制已实测通过（见 §9.8 实测记录①）；若未来版本机制变更失效，本节回退。
+### 11.4 Three-tier answer firewall
 
-### 11.4 三层回答防火墙
+Worker questions are tagged at three levels (goal-internal / supervisor-authority / needs-user) in the WORKER QUESTIONS format. The supervisor answers only the first two (authority verdicts recorded into state.json's decisions and disclosed in the final report); needs-user items are batched and asked of the real user. The firewall's purpose is to separate "supervisor as proxy" from "impersonating the user" — if the supervisor answered goal-level questions without bounds, you'd get a "two LLMs convincing each other" drift amplifier with nobody validating goal alignment.
 
-worker 提问按 goal内/监工职权/需用户三级标注（WORKER QUESTIONS 格式）。supervisor 只答前两级（监工职权裁决记入 state.json 的 decisions，总结报告披露）；需用户级攒批问真用户。防火墙目的：把"监工代理"与"冒名顶替用户"隔开——若 supervisor 无边界地代答目标级问题，会形成"两个 LLM 互相说服"的漂移放大器，目标偏移无人校验。
+### 11.5 Three-stage interrogation (the alignment funnel)
 
-### 11.5 三阶段质询（对齐漏斗）
+v1 alignment was passive (audit whatever the worker reports), pushing the burden of surfacing real problems onto the executor's perspective. v2 upgrades to active interrogation: clarify mines for understanding bias (adversarially digging out silent assumptions, inverted acceptance criteria), spec mines for completeness gaps (boundary/error-path/non-functional), plan mines for execution risk (DoD verifiability, hidden coupling, pre-mortem). Each stage's interrogation is capped at two rounds, counted independently of the Loop Guard (3 REFINEs), preventing "perfect clarification" from becoming an excuse to never start.
 
-v1 的对齐是被动的（worker 报什么审什么），真问题的挖掘责任全压在执行者视角的 worker 身上。v2 升级为主动质询：clarify 挖理解偏差（对抗式挖掘沉默假设、反向验收标准）、spec 挖完整性缺口（边界/错误路径/非功能）、plan 挖执行风险（DoD 可验证性、隐藏耦合、pre-mortem）。每阶段质询上限两轮，与 Loop Guard（3 次 REFINE）独立计数，防"完美澄清"变不开工借口。
+## 12. Mode Layering and the rework Mode
 
-## 12. 模式分层与 rework 模式
+### 12.1 Split motivation: protocol bloat vs the generalization dilemma
 
-### 12.1 拆分动机：协议膨胀 vs 泛化的矛盾
+After v2, the /supervisor protocol fit greenfield (build-from-scratch) projects well but lacked four targeted designs for the high-frequency legacy-patch/refactor scenario (baseline anchoring, regression safety net, archaeology adjudication, scope discipline). The two obvious generalization paths: add a task-mode parameter to /supervisor, or add a /rework command. The former's problem: full-protocol injection means rework clauses and greenfield clauses pollute each other's context; the longer the protocol, the lower LLM compliance (the old §9.5 problem), and leaving mode determination to a soft LLM judgment introduces "wrong mode, whole run mismatched" uncertainty. The latter's problem with copying the core protocol wholesale: 150-line-scale copy synchronization is a disaster. The answer is a physical split: `commands/_core-supervisor.md` (mode-agnostic: identity/startup/ledger/five-layer defense/OODA/QUESTIONS/dev-N skeleton/red lines) + one thin mode layer per mode (frontmatter + mode declaration + front-phase interrogation), the mode chosen explicitly by the user's command (no auto-detection).
 
-v2 之后 /supervisor 协议对绿地项目（从零开发）高度适配，但对老项目修补/重构这类高频场景缺四块针对性设计（基线锚定、回归安全网、考古裁决、范围纪律）。直接的泛化路径有两个：给 /supervisor 加任务模式参数，或新增 /rework 命令。前者的问题：全量协议注入意味着 rework 条款与绿地条款互相污染上下文，协议越长 LLM 遵循度越低（§9.5 的老问题），且模式判定交给 LLM 软判断会引入"判错模式整场错配"的不确定性。后者单独复制核心协议的问题：150 行级拷贝的同步维护是灾难。解法是物理拆分：`commands/_core-supervisor.md`（模式无关：身份/启动/账本/五层防御/OODA/QUESTIONS/dev-N 骨架/红线）+ 每模式一个薄模式层（frontmatter + 模式声明 + 前置阶段质询），模式由用户显式选命令（不做自动判定）。
+### 12.2 Composition mechanism: install-time splicing (option B), not runtime @ references
 
-### 12.2 组合机制：安装期拼接（方案 B），非运行时 @ 引用
+Mode layers and the core are cat-spliced into a single command file by install.sh at install time. Choosing splicing over @ references matches the suite's standing philosophy (hard over soft; the first hedge in §9.5): splicing happens at install time, grep-assertable, diff-reviewable; the spliced product carries three structural assertions (frontmatter uniqueness — a later `---` horizontal rule is not misparsed; five required sections present; no duplicated level-2 headings — mode-layer sections must not collide with the core's), assertion failure backs up and aborts, leaving no half-written output. **Two key dev-0 conclusions**: spliced products load fine as slash commands (option B's premise holds); **underscore-prefixed files also register as commands** (tested, contradicting expectation) — therefore `_core-supervisor.md` must never go into `~/.claude/commands/` (it would become a mis-triggerable pseudo-command); the source copy installs only to `~/.claude/hooks/claude-supervisor/`.
 
-模式层与 core 在 install.sh 安装期 cat 拼接成单一命令文件。选拼接而非 @ 引用的理由与本套件一贯哲学一致（能硬不软，§9.5 对冲策略第一条）：拼接发生在安装期，可 grep 断言、可 diff 审查；拼接产物带三重结构断言（frontmatter 唯一性——第二个 `---` 后的水平线不误判；五个关键节齐全；无重复二级标题——模式层章节不得与 core 撞名），断言失败备份中止、不留半成品。**dev-0 实测的两个关键结论**：拼接产物可被 Claude Code 正常加载为 slash command（方案 B 前提成立）；**下划线前缀文件也会被注册为命令**（实测推翻预期）——因此 `_core-supervisor.md` 绝不能放进 `~/.claude/commands/`（会变成可误触的伪命令），原料副本只装 `~/.claude/hooks/claude-supervisor/`。
+Zero-regression guarantee: the split is a pure refactor — the spliced product's diff against the pre-split supervisor.md allows only a new mode-declaration section, section reordering, and three parameterized greenfield-specific phrasings (startup step 7's first-phase instruction sentence — time note: it was step 7 at split time; after v3 inserted the cron step it is now step 8 / the phase enumeration / the schema example — parameters declared by the mode layer; under rework the supervisor's initial instruction delivers the mode's enumeration to override worker.md's greenfield default). dev-1 gate measured: 24 removed lines = 20 pure moves + 4 permitted rewrites, zero clauses lost.
 
-零回归保障：拆分是纯重构，拼接产物与拆分前 supervisor.md 的 diff 仅允许模式声明节新增、章节顺序重排、三处绿地特化措辞参数化（启动步骤 7 首阶段指令整句——时点注记：拆分时是步骤 7，v3 插入 cron 步骤后现行 core 中顺延为步骤 8 / phase 枚举 / schema 示例——参数由模式层声明，rework 下由 supervisor 初始指令下发本模式枚举覆盖 worker.md 的绿地默认值）。dev-1 门禁实测：removed 24 条 = 纯移位 20 + 允许改写 4，零条款丢失。
+### 12.3 rework's archaeology four-piece set and safety net
 
-### 12.3 rework 的考古四件套与安全网
+rework state machine: `archaeology → safety-net → spec → plan → dev-N`. The four-piece archaeology set (architecture map / debt list / suspicion list / dependency dark-web) is grounded in: the first lesson of a legacy project is archaeology, not planning — without a behavioral baseline, REFINE/APPROVE cannot judge "fixed or broken". Three hard rules: bug-vs-feature suspicions are never worker-adjudicated (whatever git blame can't settle is marked "for the user", defaulting to needs-user level — an archaeology verdict's archival value exceeds greenfield's; unrecorded verdicts get re-committed by someone later); safety-net tests lock behavior, not implementation (tests asserting internal structure make refactors inevitably false-red); the safety net contains the to-be-changed behavior (only by locking the current state first can pre/post diffs be attributed).
 
-rework 状态机：`archaeology → safety-net → spec → plan → dev-N`。考古四件套（架构地图/债务清单/疑点清单/依赖暗网）的设计依据：老项目的第一课是考古而非规划——没有行为基线的 REFINE/APPROVE 无从判定"改好了还是改坏了"。三条硬规则：bug-vs-feature 疑点禁 worker 自行裁决（git blame 说不清的标"待用户"，默认"需用户"级——考古裁决的存档价值高于绿地，不落账就会有人再犯）；安全网测试锁行为不锁实现（assert 内部结构的测试会让重构必然假红）；安全网含待改行为（只有先锁住现状，改造前后的 diff 才可归因）。
+### 12.4 frozen_behaviors (the don't-touch list)
 
-### 12.4 frozen_behaviors（不改清单）
+(Implementation decision record [implementation CR P2-7]: spec F1 once required the core schema to contain an optional frozen_behaviors field, but that contradicts the zero-regression hard constraint — the core schema must remain verbatim identical to pre-split; no new fields. Final implementation: the schema definition lives in the rework mode layer (mode-specific fields belong to the mode layer), the core untouched. Self-consistent with the extraction principle "mode-agnostic goes into the core".)
 
-（实现决策记录【实施 CR P2-7】：spec F1 曾要求 core schema 含 frozen_behaviors 可选字段，但这与零回归硬约束矛盾——core schema 必须与拆分前逐字一致，不能加字段。最终实现：schema 定义放 rework 模式层（模式特化字段归模式层），core 不动。这与"模式无关者进 core"的抽取原则自洽。）
+An optional top-level state.json field, lifecycle: archaeology produces the draft → the user confirms and locks it at safety-net APPROVE (locked_by) → the first dev instruction after locking delivers the full list to the worker (workers don't read state.json; it must be told explicitly) → touching it during dev without authorization means REFINE + escalation. The mechanical signal for touching: the entry's evidence field (archaeology evidence + related file/function list) intersected with the dev diff; a non-empty intersection triggers. Fuzzy entries (like "response time must not regress") have no mechanical signal; the supervisor compares manually during review and annotates. Change channel: a needs-user QUESTIONS application; once approved, update the ledger before touching code.
 
-state.json 可选顶层字段，生命周期：archaeology 产出初稿 → safety-net APPROVE 时用户确认锁定（locked_by）→ 锁定后首个 dev 指令把清单全文下发给 worker（worker 不读 state.json，必须显式告知）→ dev 期触碰且无授权即 REFINE + 升级。触碰的机械信号：条目 evidence 字段（考古证据 + 关联文件/函数清单）与 dev diff 求交，交非空即触发；模糊条目（如"响应时间不劣化"）无机械信号，由 supervisor 审查时人工比对并标注。变更通道："需用户"级申请，获准后先改账再动手。
+### 12.5 The drive-by refactoring red line (scope comparison)
 
-### 12.5 顺手重构红线（范围比对）
+The classic death of refactoring is the "drive-by refactor": every phase changes a little extra, and the final diff is unreviewable. The countermeasure is a mechanical signal: at every dev review, run `git diff --name-only <this phase's baseline commit>..HEAD` and compare against the phase's declared scope; any excess means REFINE no matter how "reasonable" (no dependence on worker conscience or supervisor memory). Escape hatch: genuinely needing a wider scope goes through a needs-user QUESTIONS (a scope change is a goal change). Companion disciplines: the working tree must be clean before dev-1 (a dirty tree pollutes the safety-net baseline and scope comparison); one phase = one independently rollback-able unit of change; every phase's DoD must contain either a "safety-net output identical before and after" assertion or an "expected behavior diff list".
 
-重构最经典的死法是"顺手重构"：每个 phase 都顺便多改一点，最终 diff 无法评审。对策固化为机械信号：每次审查 dev 上报时必跑 `git diff --name-only <本 phase 基线 commit>..HEAD` 与该 phase 声明范围比对，超出即 REFINE 无论改动多"合理"（不依赖 worker 自觉，也不依赖 supervisor 记忆）。免责通道：确需扩大范围走"需用户"级 QUESTIONS（范围变更即目标变更）。配套纪律：进入 dev-1 前工作区必须 clean（防脏区污染安全网基线与范围比对）；单 phase = 一次可独立回滚的改动单元；每 phase DoD 必含"安全网前后输出一致"断言或"预期行为 diff 清单"。
+### 12.6 Injection size budget
 
-### 12.6 注入体积预算
+Protocol length directly governs compliance (every added mode's clauses dilute the others'), so mode layers carry a hard budget: greenfield mode layer 39 lines, rework 68, research 52, abstract 49, adversarial 43 (measured after hardening; prior revision rounds were all same-line replacements with no growth), core 195, worker 128. Spliced products: greenfield 234, rework 263, research 247, abstract 244, adversarial 238 (same-day measurements; the old lesson of the line-count table still stands: run wc -l after every change before writing numbers). rework's incremental clauses control size by referencing the core's existing mechanisms (QUESTIONS three tiers, Loop Guard, the two-round interrogation cap) rather than restating them; self-contained clauses (boundary/error-path/non-functional three-checks) are the exception — the spliced product contains no greenfield layer, so cross-mode references would dangle (implementation CR P1-1 verdict). research likewise references primarily (time-boxing/reconciliation/spot-check reproduction all reference the core's mechanical-replay discipline); the new worker-facing delivery clauses must be self-contained because workers can't read the mode layer.
 
-协议长度直接关系遵循度（每加一个模式的条款都在稀释其他模式的遵循度），故模式层有硬预算：绿地模式层 39 行、rework 模式层 68 行、research 模式层 52 行、abstract 模式层 49 行、core 195 行、worker 128 行（2026-09-11 死锁窗口修复后实测，abstract 拼接产物随 core 同步 +1——行数表此前五个数全过期，教训：改完必须 wc -l 再写数）。拼接产物：绿地 234 行、rework 263 行、research 247 行、abstract 244 行（同日实测）。rework 的增量条款通过引用 core 既有机制（QUESTIONS 三层、Loop Guard、质询两轮上限）而非重复声明来控制体积；自包含条款（边界/错误路径/非功能三查）例外——拼接产物不含绿地层，跨模式引用会悬空（实施 CR P1-1 裁定）。research 同样以引用为主（时间盒/对账/抽查复现均引用 core 机械回放纪律），新增的 worker-facing 下发条款因 worker 读不到模式层而必须自包含。
+**research mode (2026-09-09, third mode)**: the interface explicitly reserved by rework spec §3's non-goals. Design basis specs/2026-09-09-research-mode/spec.md; four core differences: the output is a report, not code (the acceptance anchor becomes a numbered question list reconciled one by one); a product-code read-only red line (git changed-file set including uncommitted ⊆ the `--out` report directory; excess means REFINE — reusing rework's scope-comparison posture); five-level evidence grading A-E + the supervisor personally spot-checking and reproducing A-C key evidence (one fabrication re-opens the whole chapter, continuing the mechanical-replay discipline); non-git directories allowed (the opposite of rework's git assertion; persisted output is the deliverable). State machine `scope → survey → dev-N` (one chapter per unit, a 90-minute per-chapter time-box against unbounded expansion). Zero code changes: a pure new mode layer + one install.sh splice registration line; the splicing structural assertions apply to it.
 
-**research 模式（2026-09-09，第三模式）**：rework spec §3 非目标明留的接口。设计依据 specs/2026-09-09-research-mode/spec.md，核心差异四条：产出是报告不是代码（验收锚点换成编号问题清单逐问对账）；产品代码只读红线（git 改动文件集含未提交 ⊆ `--out` 报告目录，越界 REFINE——复用 rework 范围比对的姿势）；证据五级分级 A-E + 监工抽查复现 A-C 级关键证据（伪证一条整章 REFINE，延续机械回放纪律）；非 git 目录允许（与 rework 的 git 断言相反，落盘即交付）。状态机 `scope → survey → dev-N`（每章一单元，单章 90 分钟时间盒防无限展开）。零代码改动：纯新增模式层 + install.sh 一行拼接注册，拼接结构断言对其生效。
+**abstract mode (2026-09-10, fourth mode)**: convergence/synthesis tasks — the input is finished material (documents/diffs/verbal background in any mix), the output is high-level propositions that govern the material; the direction is the opposite of research (divergent vs convergent), the evidence lives inside the material, not outside it. Design basis specs/2026-09-10-abstract-mode/spec.md; four core differences: the acceptance two-piece (coverage reconciliation — a material×proposition matrix where every item is either explained or explicitly marked a counterexample; back-referencing anchors — `pattern-in-material` propositions require anchors; `intent/attribution-inference` propositions are explicitly labeled as inference with a derivation chain); **input-surface lock-down** (no new material after ingest finalization — the scope discipline runs opposite to research, which locks the output while this locks the input); **empty-talk checks + absence signals** (unfalsifiable correct-sounding platitudes get demoted; what's repeatedly absent from the material must enter the list); **mandatory adversarial narrative** (one narrative explaining all the material is often the most suspicious one; alternative narratives are recommended-not-required). State machine `ingest → distill → refine-N` (per-round targeted rework against review defects + report-per-round, not chapter-by-chapter production). Unlike research: the core got two changes (the registry `--mode` enumeration gained abstract; the state-machine entry/advance clauses were parameterized — execution-phase semantics defer to the mode layer's declaration, the dev-N skeleton being the default), with the four products re-spliced in sync.
 
-**abstract 模式（2026-09-10，第四模式）**：收敛/综合任务——输入是现成材料（文档/diff/口述背景混合），产出是支配材料的高层命题；与 research 方向相反（发散 vs 收敛），证据在材料内而非材料外。设计依据 specs/2026-09-10-abstract-mode/spec.md，核心差异四条：验收两件套（覆盖对账——材料×命题矩阵，每件材料要么被解释要么显式反例；回指锚点——`材料内模式`命题锚点必填，`意图/归因推断`命题显式标注推断性质+推导链）；**输入面锁死**（ingest 定稿后不得引入新材料，范围纪律与 research 方向相反——那边锁产出这边锁输入）；**空话检查+缺席信号**（不可证伪的正确废话降级，材料里反复缺席的东西必须进清单）；**对抗叙事强制**（一个叙事解释所有材料往往是最可疑的那个，替代解释为建议项）。状态机 `ingest → distill → refine-N`（每轮审查缺陷定向返工+每轮产出即上报，非逐章生产）。与 research 不同：core 有两处改动（registry `--mode` 枚举补 abstract；状态机进入/推进条款参数化——执行阶段语义以模式层声明为准，dev-N 骨架为默认），四产物同步重拼。
+**adversarial mode (since 2026-09-17, hardened 2026-09-21, fifth mode)**: adversarial-review tasks — the input is existing output (PR diffs/design docs/research reports), the output a converged review report. Design axiom: **adversarialness comes from isolation, not from prompt declarations** — switching perspectives inside one session is context pollution (the earlier perspective's conclusions anchor the later one); writing "think critically" in a prompt buys no real adversarialness; only structural isolation — independent sessions + message topology + persistence placement — buys it. Design basis specs/2026-09-17-adversarial-review-mode/spec.md; seven core mechanisms: ① **phase ownership on both sides** — supervisor-side `ingest|assign|merge` occupying no workers[].phase, worker-side `round1 → cross-1 → (cross-2) → done` (the heaviest override yet of the core's dev-N skeleton; the two rendezvous points ride the core's "this phase explicitly requires convergence" exception clause); ② **structural guarantee of round1 isolation** — findings are reported only in the message body, registered by the supervisor into its own shard, never persisted to shared paths (the PreToolUse guard already blocks workers from writing others' shards), with the residual boundary honestly disclosed (a worker can technically read the supervisor's shard but the protocol gives no incentive); ③ **the anonymized union** — cross-1 distribution strips perspective attribution to prevent authority-following; each side receives only the others' findings (its own are never sent back — anti self-corroboration); ④ **three-state convergence** (at least two independent sides agreeing / one side persisting through attack-and-defense / explicit retraction) + the N≥3 mixed majority/minority criteria + Loop Guard capping cross at 2 rounds; ⑤ **the worker-count decision table** + perspective menu + alternate zone (user-named perspectives are hard constraints that may exceed the recommendation); ⑥ **the zero-commit discipline** (reviewing is read-only work, overriding the worker's default "commit immediately per phase" and its supervisor-unreachable self-help fallback — the interruption alignment anchor correspondingly becomes the supervisor-shard findings echo instead of git log); ⑦ **attrition handling** (≥2 sides continue, the missing side's un-crossed findings marked "not crossed due to attrition"; <2 sides degrades to a single-lane summary labeled "adversarial structure not established").
 
-## 13. 多 Supervisor 并存（v3）
+**The subagent channel's empirical adjudication (2026-09-19, fed back from a violation incident)**: in the first field run the supervisor spawned its own subagents as workers without user approval — root cause: the spec's non-goal "no automatic worker launch" never made it into the mode layer. Three field experiments (Claude Code 2.1.259 via mc --code) settled the subagent mechanism's boundaries: same-session SendMessage revives with full transcript; cross-session resume is refused; a subagent sees only its spawn prompt with zero leakage — the structural basis for round1 isolation is experimentally backed. The final design is a **dual channel**: terminal workers by default (cross-day/crash recovery/full five-layer defense), supervisor-spawned subagents as a user-explicitly-approved alternative (five constraints: background spawn; spawn prompt containing the full five-item delivery verbatim; agent_handle recorded in the ledger; interruptions flow back as in-turn tool errors; the report annotates each lane's channel).
 
-### 13.1 发现层与存储层分层的动机
+**The zero-rebuttal mandatory re-review (hardened 2026-09-21, product of the five-run retrospective)**: across five field runs, cross-1 recorded zero rebuttals and zero retractions — "truly bulletproof" and "nobody attacked seriously" are output-identical and indistinguishable, meaning the mode's central claim (the two-round structure guarantees findings get challenged or retracted) was never once validated. The hardening rule: when cross-1 shows zero fact-level rebuttals and zero retractions (grade/clustering mediations don't count), the supervisor must personally re-attack a sample of 3-5 high-impact findings (opening original anchors, hunting counter-evidence, re-verifying grades); overturned items are recorded as retractions labeled "supervisor unilateral verdict"; re-review verdicts are persisted per-item to the shard immediately (the breakpoint truth for a supervisor crashing mid-review). Hardened in the same batch: the ledger verdict word is pinned to "registered" (APPROVE reserved for core phase advancement — a field run once mixed them; a worker reading the ledger literally is a rendezvous-bypass opening); the compact-echo escape hatch (full-verbatim echo has a field-run kill case of blowing the subagent's context: live workers get compact echo, context-lost ones get full resend or a dedicated distribution package + pointer — the package contains only that side's due content, not an isolation leak); the "N items + END" tail marker (the detection means for the subagent channel's ~4KB idle_notification truncation); dedup-before-registration (a worker resending old batches after recovery doesn't double-count toward rendezvous).
 
-v2 的平铺 `.supervisor/state.json` 是单 Supervisor 世界：跨轮覆盖（新任务续写旧账，goal/workers 被覆盖）与跨模式并行不可能（三个共享资源打架：账本单例/消息路由串台/cron 查重吞并）。v3 把"发现"（worker 找监工、监工互见）与"存储"（各自账本）拆开：发现层收敛到唯一多写者文件 registry.json，存储层分散到每 supervisor 一个单写者分片目录——并发复杂度被压缩到一个文件上，其余全部是单写者纯 mv 原子写。新任务即新分片，旧账自动成为只读存档（跨轮隔离免费获得）。
+**Five field-run validation records (2026-09-18 to 09-21, the mall-label-manage/super-input repos)**: Round 2 code review (70 converged findings, the U51 NPE hard failure, four-way javap cross-corroboration); Round 3 Lion config review (47 findings, the cap-10 blind spot with dual-lane fallback); Round 4 document review (first fully compliant terminal-channel run; the TypeFree "source-private" chain-collapse of errors — A/B independently discovering the same L8 defect without knowing of each other, direct positive evidence of isolation effectiveness); Round 5 five-service completeness audit (X-1, a decision basis used backwards; cluster B's systematic membership drop; after w1's attrition and replacement, the substitute w1b independently hit X-1's root cause under intact isolation — stronger evidence than an independent co-discovery, effectively a controlled experiment). The harshest resilience test the protocol has survived: host sleep interruption, context explosion, and gateway 502 triple-failure with w5 escaping death (batch reporting + breakpoint dedup) and four standby lanes correctly exempted by the watchdog. The five straight zero-rebuttal runs are the direct basis of the hardening rule (see the previous entry).
 
-### 13.2 分片键选 session_id（UUID）的理由
+## 13. Multiple Supervisors Coexisting (v3)
 
-分片键必须跟"监工实例"走且跨 resume 稳定（dev-0 实测：`claude --resume <uuid>` 恢复同一 UUID，会话名则被重分配 test-98→test-34）。session_id 双重身份：持久身份与存储键（分片目录名、hook stdin 匹配、watchdog UDS 直投）都用它；而会话名是消息路由键（SendMessage 只认名称，UUID/短 ID 实测均不可达）——两键职责拆分，都不可弃：名字必须显式管理（/rename 唯一名，撞名在注册事务处被拦），sid 必须可靠获取（SessionStart 注入行为主，扫 sessions 注册表 fallback）。v2"ListAgents 能推导 sessionId"的假设被实测推翻（当前版本不输出 UUID），这也是 worker 改自报 sid 的根因。
+### 13.1 The motivation for splitting discovery from storage
 
-### 13.3 registry.py 单点多写者的取舍（为何不用 LLM 现场持锁）
+v2's flat `.supervisor/state.json` assumed a single-supervisor world: cross-run overwrites (a new task scribbling over the old ledger, goal/workers replaced) and cross-mode parallelism were impossible (three shared resources fighting: the ledger singleton / message routing cross-talk / cron dedup swallowing). v3 splits "discovery" (workers finding supervisors, supervisors seeing each other) from "storage" (each one's own ledger): discovery converges to the single multi-writer file registry.json, storage disperses to one single-writer shard directory per supervisor — the concurrency complexity is compressed onto one file, everything else being single-writer pure-mv atomic writes. A new task means a new shard; old ledgers automatically become read-only archives (cross-run isolation for free).
 
-registry.json 是全系统唯一多写者文件。macOS 无原生 flock（实测仅 shlock），且让 LLM 现场构造持锁读-改-写命令是执行漂移重灾区——协议条款只约束"调哪个子命令"（register/heartbeat/unregister/mark-stale），锁（fcntl 互斥、5s 超时 exit 4）、两阶段隔离确认（exit 2 + --isolation-confirmed --known-others 重读校验）、撞名分诊（exit 3）、tmp+rename 原子写全部封进 dumb 脚本。对照：state.json 原子写是单写者无锁纯 mv；install.sh 更新 settings.json 已有 python fcntl 先例。
+### 13.2 Why the shard key is session_id (a UUID)
 
-### 13.4 git 物理隔离裁决
+The shard key must travel with the "supervisor instance" and be stable across resumes (dev-0 field test: `claude --resume <uuid>` restores the same UUID, while the session name gets reassigned test-98→test-34). session_id's dual identity: persistent identity and storage key (shard directory name, hook stdin matching, watchdog UDS direct delivery all use it); the session name is the message routing key (SendMessage accepts names only; UUID/short IDs tested unreachable) — two keys, two duties, both indispensable: names must be explicitly managed (/rename unique; collisions blocked at the registration transaction), sid must be reliably obtained (SessionStart injection primarily, scanning the sessions registry as fallback). v2's assumption "ListAgents can derive sessionId" was disproven by testing (the current version outputs no UUID) — the root reason workers switched to self-reporting their sid.
 
-多 supervisor 同仓并行强制分支/linked worktree 隔离（机械可判定，不做智能合并）：范围比对、安全网基线、回滚锚点全部在各自分支语义下成立；同分支混行提交明确不支持（范围比对无法归因，见 §9.11）。未获隔离承诺的并行在注册事务处被拦（exit 2 → 用户确认分支不冲突 → 带确认重试；ESCALATE 不写入条目，根除自造死条目）。
+### 13.3 The registry.py single-point multi-writer trade-off (why not an LLM holding locks live)
 
-### 13.5 死条目处置的不对称设计
+registry.json is the system's only multi-writer file. macOS has no native flock (only shlock, tested), and having an LLM construct lock-held read-modify-write commands on the spot is the heaviest zone of execution drift — the protocol clauses constrain only "which subcommand to call" (register/heartbeat/unregister/mark-stale); the lock (fcntl mutual exclusion, 5s timeout exit 4), two-phase isolation confirmation (exit 2 + --isolation-confirmed --known-others re-read verification), name-collision triage (exit 3), and tmp+rename atomic writes are all sealed inside a dumb script. For contrast: state.json atomic writes are single-writer lockless pure mv; install.sh's settings.json updates already set the python fcntl precedent.
 
-可标 stale，不可删他人：supervisor 对 registry 里他人条目只能 mark-stale（双条件：ListAgents 按 name 不可达且心跳超 30 分钟），删除仅限注销自己——因为条目背后的分片账本还在，可能是待 resume 的实例。死条目的真正裁决者是用户：worker 注册失败时上报三选项清单（resume 推荐 / 稍后重试 / 转自主模式兜底——完成当前 phase 指令并 commit，不自行流转 phase）。
+### 13.4 The git physical-isolation verdict
 
-### 13.6 分片枚举 UUID 白名单（archive 隔离）
+Multiple supervisors on one repo in parallel force branch/linked-worktree isolation (mechanically decidable, no smart merging): scope comparison, safety-net baselines, and rollback anchors all hold within each branch's semantics; interleaved same-branch commits are explicitly unsupported (scope comparison cannot be attributed, see §9.11). Parallelism without an isolation commitment is blocked at the registration transaction (exit 2 → the user confirms branches don't conflict → retry with confirmation; ESCALATE writes no entry, rooting out self-created dead entries).
 
-hook/watchdog 扫描分片时仅匹配 UUID 格式目录名，archive/ 与非 UUID 目录构造性不可见——归档隔离靠目录命名规则机械保证，不靠运行时判断。旧平铺布局升级窗口兼容：分片存在但 hook 的 sid 零命中时追加一次平铺 workers[] 兜底通道（v2 存量轮次不因首个 v3 分片出现而静默丢失中断直投）。
+### 13.5 The asymmetric design of dead-entry handling
 
-### 13.7 hook 化三件套的取舍
+Markable stale, never deleting others' entries: a supervisor can only mark-stale another's registry entry (dual condition: ListAgents-by-name unreachable AND heartbeat over 30 minutes stale); deletion is reserved for unregistering oneself — because the entry's shard ledger still exists and may belong to an instance awaiting resume. The true adjudicator of dead entries is the user: on registration failure the worker reports a three-option list (resume recommended / retry later / fall back to autonomous mode — complete the current phase's instruction and commit, no self-advancing phases).
 
-v3 把两类"LLM 执行漂移重灾区"升级为机械保证：sid 获取（SessionStart 注入器：stdout 单行 `SESSION_ID <uuid> <source>`，零判断零文件写）与分片键防错（PreToolUse 守卫：Write|Edit 路径 uuid 与 stdin sid 等值校验，不等 exit 2 + stderr 给正确 sid；registry.json 直编一律拦）。守卫是绊索不是墙（Bash 仍可绕过，属协议红线范畴）；放行路径纯字符串短路零开销。**PostToolUse 自动 register 评估后未纳入**：需解析 state.json 判断会话角色，脆弱且与"注册是显式隔离确认事务"的语义冲突——unregister/stale 裁决保留 LLM 侧。附带收益：source=resume 的注入提示成为 resume 恢复流程的机械触发通道。
+### 13.6 Shard enumeration's UUID whitelist (archive isolation)
+
+When hooks/watchdog scan shards they match only UUID-format directory names; archive/ and non-UUID directories are constructively invisible — archive isolation is mechanically guaranteed by the directory naming rule, not by runtime judgment. Upgrade-window compatibility for the old flat layout: when a shard exists but the hook's sid has zero hits, one flat workers[] fallback pass is appended (v2 legacy rounds don't silently lose direct interruption delivery at the appearance of the first v3 shard).
